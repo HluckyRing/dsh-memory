@@ -3,7 +3,9 @@
  *
  * 由同目录的 `pre-commit` 调用，也可单独运行：
  *
- *     node .githooks/check-secrets.mjs        # 退出码 0 = 干净，1 = 命中
+ *     node .githooks/check-secrets.mjs        # 只查暂存区（pre-commit 用）
+ *     node .githooks/check-secrets.mjs --all  # 全量扫描所有 git 跟踪文件（CI 用）
+ *     退出码 0 = 干净，1 = 命中
  *
  * 拦三类东西：
  *   1) 文件名本身属于密钥 / 私有文件（.env、*.local.md、.dsh-memory/ 等）
@@ -107,18 +109,26 @@ const nameHits = []
 const secretHits = []
 const personalHits = []
 
-let staged = []
+const scanAll = process.argv.includes('--all')
+const scopeLabel = scanAll ? '全量扫描' : '暂存区'
+
+let targets = []
 try {
-  staged = git(['diff', '--cached', '--name-only', '--diff-filter=ACMR'])
+  const listArgs = scanAll ? ['ls-files'] : ['diff', '--cached', '--name-only', '--diff-filter=ACMR']
+  targets = git(listArgs)
     .split('\n')
     .map((line) => line.trim().replace(/\\/g, '/'))
     .filter(Boolean)
 } catch {
   rmSync(work, { recursive: true, force: true })
-  process.exit(0) // 拿不到暂存清单就不阻断
+  if (scanAll) {
+    console.error('✗ 密钥守卫无法读取 git 文件清单')
+    process.exit(1)
+  }
+  process.exit(0) // 拿不到暂存清单就不阻断提交
 }
 
-for (const file of staged) {
+for (const file of targets) {
   for (const [re, label] of NAME_RULES) {
     if (re.test(file)) {
       nameHits.push(`    ${file}  ← 命中文件规则 ${label}`)
@@ -128,7 +138,7 @@ for (const file of staged) {
 
   let content
   try {
-    content = git(['show', `:${file}`])
+    content = scanAll ? readFileSync(join(REPO, file), 'utf8') : git(['show', `:${file}`])
   } catch {
     continue // 读不到就跳过，守卫自身出错不应阻断提交
   }
@@ -154,27 +164,27 @@ let failed = false
 
 if (nameHits.length) {
   failed = true
-  console.error(`✗ 已阻止提交：检测到密钥/私有类文件被暂存（仓库：${REPO}）`)
+  console.error(`✗ 检测到密钥/私有类文件（${scopeLabel}，仓库：${REPO}）`)
   console.error(nameHits.join('\n'))
   console.error('  这些文件不应入库。强制添加过的请先取消暂存：git restore --staged <file>')
 }
 
 if (secretHits.length) {
   failed = true
-  console.error(`✗ 已阻止提交：暂存内容里出现疑似真实密钥（仓库：${REPO}）`)
+  console.error(`✗ 检测到疑似真实密钥（${scopeLabel}，仓库：${REPO}）`)
   console.error(secretHits.join('\n'))
   console.error('  请改用环境变量或凭据服务；确属误报可 git commit --no-verify 跳过')
 }
 
 if (personalHits.length) {
   failed = true
-  console.error(`✗ 已阻止提交：暂存内容里出现本机个人信息（仓库：${REPO}）`)
+  console.error(`✗ 检测到本机个人信息（${scopeLabel}，仓库：${REPO}）`)
   console.error(personalHits.join('\n'))
   console.error('  公开仓库不应带上本机用户名/家目录路径，请替换为占位符（如 <YOUR_PATH>）')
 }
 
 if (!failed && process.env.PRECOMMIT_VERBOSE === '1') {
-  console.error(`✓ 密钥守卫通过（仓库：${REPO}${sep}，暂存 ${staged.length} 个文件）`)
+  console.error(`✓ 密钥守卫通过（仓库：${REPO}${sep}，${scopeLabel} ${targets.length} 个文件）`)
 }
 
 process.exit(failed ? 1 : 0)

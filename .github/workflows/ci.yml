@@ -28,7 +28,7 @@ jobs:
         run: node --check index.js
 
       - name: 密钥守卫
-        run: node .githooks/check-secrets.mjs
+        run: node .githooks/check-secrets.mjs --all
 
       - name: 离线自检
         run: node test/selftest.mjs

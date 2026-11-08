@@ -163,8 +163,8 @@ plugin_manager(action: "install_bundle", target: "D:\\vibe-coding\\plugin\\dsh-m
 启用提交前守卫：
 
 ```bash
-git config core.hooksPath .githooks   # 一次性设置，之后 git commit 自动跑 check-secrets
-node .githooks/check-secrets.mjs      # 也可以手动跑
+git config core.hooksPath .githooks   # 一次性设置，之后 git commit 自动跑 check-secrets（只查暂存区）
+node .githooks/check-secrets.mjs --all  # 手动全量扫描所有 git 跟踪文件（CI 也这么跑）
 ```
 
 ## 卸载 / 清空

@@ -96,10 +96,23 @@ const clampInt = (value, fallback, min, max) => {
 const str = (value, fallback = '') =>
   typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback
 
+/**
+ * 记忆目录名只接受工作区内的简单相对路径；绝对路径（含 Windows 盘符）或
+ * 带 `..` 的逃逸写法一律回退默认值，避免把 .gitignore / MEMORY.md 写到工作区外。
+ */
+function safeDirName(raw) {
+  const value = str(raw, DEFAULTS.dirName).replace(/[/\\]+$/u, '')
+  if (value === '') return DEFAULTS.dirName
+  if (isAbsolute(value) || /^[A-Za-z]:/u.test(value)) return DEFAULTS.dirName
+  const segments = value.split(/[\\/]+/u).filter((segment) => segment !== '' && segment !== '.')
+  if (segments.length === 0 || segments.includes('..')) return DEFAULTS.dirName
+  return segments.join('/')
+}
+
 function resolveConfig(raw) {
   const c = raw && typeof raw === 'object' ? raw : {}
   return {
-    dirName: str(c.dirName, DEFAULTS.dirName).replace(/[/\\]+$/u, '') || DEFAULTS.dirName,
+    dirName: safeDirName(c.dirName),
     capture: c.capture !== false,
     captureSubagents: c.captureSubagents === true,
     inject: c.inject !== false,
@@ -200,10 +213,17 @@ function dayStamp(date = new Date()) {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
 }
 
-/** 会话 id → 文件名安全的短标识（取字母数字尾部 8 位）。 */
+/** 会话 id → 文件名安全的短标识（sha1 前 10 位，避免不同 id 尾部相同导致撞文件）。 */
 function sessionSlug(sessionId) {
-  const compact = String(sessionId ?? '').replace(/[^A-Za-z0-9]/gu, '')
-  return (compact.slice(-8) || 'session').toLowerCase()
+  const value = String(sessionId ?? '')
+  if (value.trim() === '') return 'session'
+  return createHash('sha1').update(value).digest('hex').slice(0, 10)
+}
+
+/** 该会话文件是否属于当前会话（按头部完整会话 id 判断，不依赖文件名）。 */
+function isOwnSessionLog(text, sessionId) {
+  const id = String(sessionId ?? '')
+  return id !== '' && String(text ?? '').includes(`- 会话：${id}`)
 }
 
 function safeString(value) {
@@ -408,14 +428,15 @@ function scoreTerms(text, terms) {
 
 /** recent 模式：最近几个会话 × 每个会话最近几轮。 */
 async function recentHistorySections(state, config) {
-  const slug = sessionSlug(state.sessionId)
-  const files = (await listSessionFiles(join(state.dir, 'sessions')))
-    .filter((file) => !file.name.includes(`_${slug}`))
-    .slice(0, config.recentSessions)
+  if (config.recentSessions <= 0) return []
+  // 末尾可能包含当前会话自己的文件：多取一个再按会话 id 过滤，保证选出 recentSessions 个历史会话。
+  const files = (await listSessionFiles(join(state.dir, 'sessions'))).slice(0, config.recentSessions + 1)
   const sections = []
   for (const file of files) {
+    if (sections.length >= config.recentSessions) break
     const text = await readIfExists(file.path)
     if (text.trim() === '') continue
+    if (isOwnSessionLog(text, state.sessionId)) continue
     const blocks = splitTurnBlocks(text).slice(-config.recentTurns)
     if (blocks.length === 0) continue
     sections.push(
@@ -432,15 +453,17 @@ async function recentHistorySections(state, config) {
  * 始终保留最近的一块保证上下文连贯；查询为空或无一命中时退回 recent 行为。
  */
 async function relevanceHistorySections(state, config, query) {
-  const slug = sessionSlug(state.sessionId)
-  const files = (await listSessionFiles(join(state.dir, 'sessions')))
-    .filter((file) => !file.name.includes(`_${slug}`))
-    .slice(0, config.relevanceScanSessions)
+  // 多扫一个文件：当前会话自己的日志会占用一个名额，随后按会话 id 过滤掉。
+  const files = (await listSessionFiles(join(state.dir, 'sessions'))).slice(
+    0,
+    config.relevanceScanSessions + 1,
+  )
   const terms = queryTerms(query)
   const candidates = []
   for (const file of files) {
     const text = await readIfExists(file.path)
     if (text.trim() === '') continue
+    if (isOwnSessionLog(text, state.sessionId)) continue
     splitTurnBlocks(text).forEach((block, index) => {
       candidates.push({
         file: file.name,

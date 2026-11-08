@@ -35,7 +35,7 @@
   "scripts": {
     "test": "node test/selftest.mjs",
     "check:syntax": "node --check index.js",
-    "check:secrets": "node .githooks/check-secrets.mjs",
+    "check:secrets": "node .githooks/check-secrets.mjs --all",
     "check": "npm run check:syntax && npm run check:secrets && npm test"
   },
   "repository": {

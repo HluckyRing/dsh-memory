@@ -542,6 +542,52 @@ try {
     assert.doesNotMatch(digest, /第一轮用户输入/)
   })
 
+  await test('sessionSlug hashes the whole id instead of its shared tail', () => {
+    const a = t.sessionSlug('session-aaaa-cafe1234')
+    const b = t.sessionSlug('session-bbbb-cafe1234')
+    assert.notEqual(a, b, 'ids sharing the same tail must not share a file name')
+    assert.match(a, /^[0-9a-f]{10}$/u)
+    assert.equal(t.sessionSlug(''), 'session')
+    assert.equal(t.sessionSlug('same-id'), t.sessionSlug('same-id'))
+  })
+
+  await test('the current session log is excluded by session id, not by file name', async () => {
+    const ownCwd = join(root, 'own-log-workspace')
+    const ownState = {
+      ...state,
+      cwd: ownCwd,
+      dir: await t.ensureRoot({ ...state, cwd: ownCwd }, config),
+      sessionId: 'session-alpha-0001',
+    }
+    const sessionsDir = join(ownState.dir, 'sessions')
+    // 故意用升级前的旧命名，模拟“文件名与当前 slug 不匹配”的自己会话日志
+    await writeFile(
+      join(sessionsDir, '2026-10-20_oldname01.md'),
+      '# 会话记录 · 2026-10-20\n- 会话：session-alpha-0001\n\n## 第 1 轮 · 2026-10-20 10:00:00\n- 用户：自己的会话不该再注入XYZ\n',
+      'utf8',
+    )
+    await writeFile(
+      join(sessionsDir, '2026-10-19_other001.md'),
+      '# 会话记录 · 2026-10-19\n- 会话：session-other-0002\n\n## 第 1 轮 · 2026-10-19 10:00:00\n- 用户：另一个会话的历史XYZ\n',
+      'utf8',
+    )
+    const digest = await t.buildDigest(
+      ownState,
+      t.resolveConfig({ maxInjectChars: 8000, injectMode: 'recent', recentSessions: 2, recentTurns: 1 }),
+    )
+    assert.doesNotMatch(digest, /自己的会话不该再注入XYZ/u)
+    assert.match(digest, /另一个会话的历史XYZ/u)
+  })
+
+  await test('dirName rejects absolute and parent-escape paths', () => {
+    assert.equal(t.resolveConfig({ dirName: '../../outside' }).dirName, '.dsh-memory')
+    assert.equal(t.resolveConfig({ dirName: '..' }).dirName, '.dsh-memory')
+    assert.equal(t.resolveConfig({ dirName: '/abs/memory' }).dirName, '.dsh-memory')
+    assert.equal(t.resolveConfig({ dirName: 'C:/abs/memory' }).dirName, '.dsh-memory')
+    assert.equal(t.resolveConfig({ dirName: 'nested/mem/' }).dirName, 'nested/mem')
+    assert.equal(t.resolveConfig({ dirName: '.dsh-memory/' }).dirName, '.dsh-memory')
+  })
+
   await test('digest is capped by maxInjectChars', async () => {
     const tiny = { ...config, maxInjectChars: 1000 }
     const digest = await t.buildDigest({ ...state, sessionId: 'session-gamma-7777', slug: 'gamma777' }, tiny)
