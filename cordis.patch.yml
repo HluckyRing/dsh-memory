@@ -16,6 +16,8 @@
         inject: true
         # 是否把子代理会话也单独记录（默认否，避免噪音）。
         captureSubagents: false
+        # 是否也向子代理会话注入记忆上下文（默认否，省 token）。
+        injectSubagents: false
         # 新工作区自动创建 MEMORY.md / PROGRESS.md 骨架（只补缺失文件，不覆盖内容）。
         scaffoldDocs: true
         # 是否同时注入工作区根目录既有的 MEMORY.md。

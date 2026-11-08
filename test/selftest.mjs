@@ -3,7 +3,7 @@
  * 运行：node test/selftest.mjs
  */
 import assert from 'node:assert/strict'
-import { appendFile, mkdtemp, readFile, stat, writeFile, rm, utimes } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, stat, writeFile, rm, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -215,7 +215,12 @@ try {
     )
     await utimes(newFile, new Date('2026-10-21T11:00:00Z'), new Date('2026-10-21T11:00:00Z'))
 
+    // 首选路径：deriveMessages()（user/message 的 data 里保留 source.kind）
     const session = (text) => ({
+      deriveMessages: () => [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }],
+    })
+    // 旧运行时兜底：只有 snapshotEvents() 时也要能选出相关块
+    const legacySession = (text) => ({
       snapshotEvents: () => [
         { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } },
       ],
@@ -230,6 +235,13 @@ try {
     assert.match(relevance, /数据库迁移时连接池报错/)
     // 最近一块始终保留，保证上下文连贯
     assert.match(relevance, /样式再调一下/)
+
+    const legacy = await t.buildDigest(
+      { ...base, agent: { session: legacySession('数据库迁移为什么报错') } },
+      t.resolveConfig({ maxInjectChars: 4000, injectMode: 'relevance', relevanceKeepRecent: 1 }),
+    )
+    assert.match(legacy, /相关历史记录/)
+    assert.match(legacy, /数据库迁移时连接池报错/)
 
     const recent = await t.buildDigest(
       { ...base, agent: { session: session('数据库迁移为什么报错') } },
@@ -301,6 +313,12 @@ try {
   await test('memory prompt context opts out of {{variable}} interpolation', async () => {
     const captured = []
     const contextCwd = join(root, 'context-workspace')
+    const promptService = {
+      context: (options) => {
+        captured.push(options)
+        return () => {}
+      },
+    }
     const agent = {
       id: 'agent-context-0001',
       session: {
@@ -314,12 +332,9 @@ try {
           fn()
           return () => {}
         },
-        systemPrompt: {
-          context: (options) => {
-            captured.push(options)
-            return () => {}
-          },
-        },
+        // 插件通过 agentCtx.get('systemPrompt') 取服务，不再依赖祖先 fiber 的 inject
+        get: (serviceName) => (serviceName === 'systemPrompt' ? promptService : undefined),
+        systemPrompt: promptService,
       },
     }
     const fakeCtx = {
@@ -458,6 +473,7 @@ try {
           fn()
           return () => {}
         },
+        get: () => undefined,
         systemPrompt: { context: () => () => {} },
       },
     }
@@ -539,7 +555,8 @@ try {
 
   await test('the same session does not re-read its own log', async () => {
     const digest = await t.buildDigest(state, config)
-    assert.doesNotMatch(digest, /第一轮用户输入/)
+    // 索引里可以出现本会话的首条输入摘要，但本会话的轮次块不能再被当成历史注入
+    assert.doesNotMatch(digest, /- 用户：第一轮用户输入/u)
   })
 
   await test('sessionSlug hashes the whole id instead of its shared tail', () => {
@@ -586,6 +603,136 @@ try {
     assert.equal(t.resolveConfig({ dirName: 'C:/abs/memory' }).dirName, '.dsh-memory')
     assert.equal(t.resolveConfig({ dirName: 'nested/mem/' }).dirName, 'nested/mem')
     assert.equal(t.resolveConfig({ dirName: '.dsh-memory/' }).dirName, '.dsh-memory')
+  })
+
+  await test('subagent memory injection is opt-in', async () => {
+    const makeHarness = (rawConfig) => {
+      const captured = []
+      const cwd = join(root, 'subagent-workspace')
+      const promptService = {
+        context: (options) => {
+          captured.push(options)
+          return () => {}
+        },
+      }
+      const agent = {
+        id: 'agent-sub-0001',
+        session: { id: 'session-sub-0001', header: { cwd, createdAt: Date.now() }, snapshotEvents: () => [] },
+        ctx: {
+          on: () => () => {},
+          effect: (fn) => {
+            fn()
+            return () => {}
+          },
+          get: (serviceName) => (serviceName === 'systemPrompt' ? promptService : undefined),
+        },
+      }
+      let created = () => {}
+      const fakeCtx = {
+        on: (event, listener) => {
+          if (event === 'agent/created') created = listener
+          return () => {}
+        },
+        get: () => undefined,
+        agents: { roots: () => [], currentInitiator: () => undefined },
+        tools: { register: () => () => {} },
+      }
+      const dispose = mod.apply(fakeCtx, rawConfig)
+      return { captured, dispose, trigger: () => created({ agent }) }
+    }
+    const off = makeHarness({})
+    try {
+      await off.trigger()
+      assert.equal(off.captured.length, 0, 'subagent must not receive memory context by default')
+    } finally {
+      off.dispose()
+    }
+    const on = makeHarness({ injectSubagents: true })
+    try {
+      await on.trigger()
+      assert.equal(on.captured.length, 1, 'injectSubagents:true must register the context')
+    } finally {
+      on.dispose()
+    }
+  })
+
+  await test('relevance query uses deriveMessages and ignores deprecated snapshotEvents', async () => {
+    const migrationCwd = join(root, 'migration-workspace')
+    const dir = await t.ensureRoot({ cwd: migrationCwd, dir: '' }, config)
+    await writeFile(
+      join(dir, 'sessions', '2026-10-20_mig00001.md'),
+      '# 会话记录\n\n## 第 1 轮 · 10:00\n- 用户：缓存击穿怎么处理\n- 助手：加互斥锁与空值缓存\n',
+      'utf8',
+    )
+    const digest = await t.buildDigest(
+      {
+        cwd: migrationCwd,
+        dir,
+        sessionId: 'session-migration-0001',
+        agent: {
+          session: {
+            deriveMessages: () => [
+              { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '缓存击穿怎么处理' }] },
+            ],
+            snapshotEvents: () => {
+              throw new Error('snapshotEvents must not be called when deriveMessages exists')
+            },
+          },
+        },
+      },
+      t.resolveConfig({ maxInjectChars: 4000, injectMode: 'relevance' }),
+    )
+    assert.match(digest, /相关历史记录/u)
+    assert.match(digest, /缓存击穿怎么处理/u)
+  })
+
+  await test('session index is written once and injected into other sessions', async () => {
+    const indexCwd = join(root, 'index-workspace')
+    const idxState = {
+      ...state,
+      cwd: indexCwd,
+      dir: await t.ensureRoot({ ...state, cwd: indexCwd }, config),
+      sessionId: 'session-index-0001',
+      slug: t.sessionSlug('session-index-0001'),
+      sessionFile: '',
+      sessionHeaderWritten: false,
+      writeChain: Promise.resolve(),
+      writtenTurns: null,
+      indexed: false,
+    }
+    const buffer = t.newBuffer(1)
+    t.applyEvent(buffer, {
+      type: 'user/message',
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: '索引里的第一条用户输入' }] },
+    })
+    buffer.reason = { kind: 'completed' }
+    await t.appendTurn(idxState, buffer, config)
+    await t.appendTurn(idxState, buffer, config)
+    const indexText = await readFile(join(idxState.dir, 'index.md'), 'utf8')
+    assert.match(indexText, /索引里的第一条用户输入/u)
+    assert.equal((indexText.match(new RegExp(` ${idxState.slug}：`, 'gu')) ?? []).length, 1)
+    const digest = await t.buildDigest(
+      { ...idxState, sessionId: 'session-other-0002', slug: t.sessionSlug('session-other-0002') },
+      config,
+    )
+    assert.match(digest, /会话索引/u)
+    assert.match(digest, /索引里的第一条用户输入/u)
+  })
+
+  await test('session index is backfilled for existing logs', async () => {
+    const backfillCwd = join(root, 'index-backfill-workspace')
+    const sessionsDir = join(backfillCwd, '.dsh-memory', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    await writeFile(
+      join(sessionsDir, '2026-10-01_oldidx0001.md'),
+      '# 会话记录\n\n## 第 1 轮 · 2026-10-01 09:00:00\n- 用户：旧会话的回填关键字\n',
+      'utf8',
+    )
+    const dir = await t.ensureRoot({ cwd: backfillCwd, dir: '' }, config)
+    const indexText = await readFile(join(dir, 'index.md'), 'utf8')
+    assert.match(indexText, /旧会话的回填关键字/u)
+    const digest = await t.buildDigest({ ...state, cwd: backfillCwd, dir, sessionId: 'session-new-0003' }, config)
+    assert.match(digest, /会话索引/u)
   })
 
   await test('digest is capped by maxInjectChars', async () => {

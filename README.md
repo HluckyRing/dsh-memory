@@ -29,6 +29,7 @@ DSH 开新会话时，agent 对上一个会话聊了什么一无所知：为什�
 | 检索历史 | 模型调用 `memory_search` | 在全部记忆文本里按关键字检索，返回 `文件:行号: 内容` |
 | 查看状态 | 模型调用 `memory_status` | 显示记忆目录、会话数、以及新会话将看到的确切注入内容 |
 | 相关度挑选 | 自动，`injectMode: relevance`（默认） | 本地关键词打分挑选与本轮相关的历史块，同样的字符预算装更相关的内容 |
+| 会话索引 | 自动，写入该会话首轮时更新 `index.md` | 日期 + 会话短 id + 首条用户输入，让新会话发现超出扫描范围的更早历史 |
 | 兜底不丢 | 自动，工作区不可写时 | 退回 `~/.dsh/dsh-memory/<工作区名>-<hash>` |
 
 ## 安装
@@ -67,6 +68,7 @@ plugin_manager(action: "install_bundle", target: "D:\\vibe-coding\\plugin\\dsh-m
 <工作区>/.dsh-memory/
 ├─ MEMORY.md              # 长期事实 / 决定 / 偏好（agent 通过 memory_note 主动写入）
 ├─ PROGRESS.md            # 任务进度 / 错误 / 待办（同样由 memory_note 写入）
+├─ index.md               # 会话索引：日期 + 会话短 id + 首条用户输入（自动维护）
 ├─ README.md              # 目录说明（首次自动创建）
 ├─ .gitignore             # 内容为 *，因此数据永远不会进 git
 └─ sessions/
@@ -131,9 +133,10 @@ plugin_manager(action: "install_bundle", target: "D:\\vibe-coding\\plugin\\dsh-m
     relevanceKeepRecent: 1    # relevance 模式：始终保留最近几块（上下文连贯）
     scaffoldDocs: true        # 新工作区自动创建 MEMORY.md / PROGRESS.md 骨架
     captureSubagents: false   # 是否也记录子代理会话
+    injectSubagents: false    # 是否也向子代理会话注入记忆
 ```
 
-全部字段（`dirName`、`capture`、`inject`、`injectMode`、`maxInjectChars`、`scaffoldDocs`、`includeWorkspaceMemoryDoc`、`recentSessions`、`recentTurns`、`relevanceScanSessions`、`relevanceKeepRecent`、`userTextLimit`、`assistantTextLimit`、`sessionTextLimit`、`captureSubagents`、`fallbackDir`）见 [docs/CONFIG.md](docs/CONFIG.md)。
+全部字段（`dirName`、`capture`、`inject`、`injectMode`、`maxInjectChars`、`scaffoldDocs`、`includeWorkspaceMemoryDoc`、`recentSessions`、`recentTurns`、`relevanceScanSessions`、`relevanceKeepRecent`、`userTextLimit`、`assistantTextLimit`、`sessionTextLimit`、`captureSubagents`、`injectSubagents`、`fallbackDir`）见 [docs/CONFIG.md](docs/CONFIG.md)。
 
 ### 注入方式：recent 与 relevance
 

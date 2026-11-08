@@ -26,6 +26,7 @@
 | `capture` | boolean | `true` | — | 是否逐轮自动记录。关掉后只剩工具与注入 |
 | `inject` | boolean | `true` | — | 是否把记忆注入会话上下文。关掉后只写不读 |
 | `captureSubagents` | boolean | `false` | — | 是否也把子代理会话单独记成文件（默认关，避免噪音） |
+| `injectSubagents` | boolean | `false` | — | 是否也向子代理会话注入记忆上下文（默认关，省 token；子代理默认也不记录） |
 | `scaffoldDocs` | boolean | `true` | — | 新工作区自动创建 `MEMORY.md` / `PROGRESS.md` 骨架（只补缺失文件，绝不覆盖已有内容） |
 | `includeWorkspaceMemoryDoc` | boolean | `true` | — | 是否把工作区根目录既有的 `MEMORY.md` 一并注入（给已经有自己约定的项目用） |
 | `injectMode` | string | `relevance` | `relevance` \| `recent` | 历史挑选策略：按本轮问题打分，或固定取最近会话 |
@@ -107,6 +108,7 @@
 | --- | --- | --- |
 | `MEMORY.md` | 长期事实 / 决定 / 偏好 | `memory_note`（`kind` = note/fact/decision/preference）或人手改 |
 | `PROGRESS.md` | 任务进度 / 错误 / 待办 | `memory_note`（`kind` = progress/error/todo）或人手改 |
+| `index.md` | 会话索引（日期 + 会话短 id + 首条用户输入摘要） | 插件自动维护；老工作区首次加载时自动回填（最多 200 个旧会话） |
 | `sessions/<日期>_<会话id>.md` | 每轮记录 | 插件自动 |
 | `README.md` | 目录说明 | 首次自动创建 |
 | `.gitignore` | 内容为 `*` | 首次自动创建，保证数据不进 git |

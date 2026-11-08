@@ -19,6 +19,13 @@
 - **`dirName` 校验**：只接受工作区内相对路径，绝对路径、盘符或含 `..` 的逃逸写法静默回退默认 `.dsh-memory`，避免把 `.gitignore` 与记忆文件写到工作区外。
 - **CI 密钥守卫真正生效**：`check-secrets.mjs` 新增 `--all`（`git ls-files` 全量扫描），CI 与 `npm run check` 改用它；此前只查暂存区，干净 checkout 上恒过。自检新增 3 条（共 25 条）。
 
+### 新增
+- **会话索引 `index.md`**：会话首轮落盘时追加一行（日期 + 会话短 id + 首条用户输入摘要），并注入新会话上下文；老工作区首次加载时自动回填最近 200 个会话。解决“历史会话超过 `relevanceScanSessions` 后旧会话不可达”的问题，同时保持纯文本、零模型调用。
+
+### 变更
+- **子代理注入改为可选**：新增 `injectSubagents`（默认 `false`）。此前子代理虽然默认不记录，却仍会收到整段记忆上下文，白付 token；现在默认不注入，需要时显式打开。
+- **已弃用 API 迁移**：相关度查询优先用 `session.deriveMessages()`（`user/message` 的 `data` 仍保留 `source.kind`），`snapshotEvents()` 只在旧运行时兜底；`systemPrompt` 改用 `agentCtx.get('systemPrompt')` 获取，不再依赖祖先 fiber 是否 inject。自检新增 4 条（共 29 条）。
+
 ## [1.0.0] - 2026-11-08
 
 首个公开版本。插件本身在本地已长期自用，这次整理成可上传 GitHub 的标准插件仓库：

@@ -28,6 +28,7 @@ export const inject = ['agents', 'tools']
 const LOG_PREFIX = '[dsh-memory]'
 const MEMORY_DIR = '.dsh-memory'
 const CONTEXT_NAME = 'dsh-memory'
+const INDEX_FILE = 'index.md'
 /** 单条 memory_note 文本上限：超过就截断并标记，避免一条大 note 挤掉其他记忆 */
 const NOTE_TEXT_LIMIT = 2000
 
@@ -38,6 +39,8 @@ const DEFAULTS = {
   capture: true,
   /** 是否记录子代理会话（默认否，避免噪音） */
   captureSubagents: false,
+  /** 是否也向子代理会话注入记忆上下文（默认否，省 token） */
+  injectSubagents: false,
   /** 是否把记忆注入会话上下文 */
   inject: true,
   /** 是否自动创建空的 MEMORY.md / PROGRESS.md 骨架 */
@@ -115,6 +118,7 @@ function resolveConfig(raw) {
     dirName: safeDirName(c.dirName),
     capture: c.capture !== false,
     captureSubagents: c.captureSubagents === true,
+    injectSubagents: c.injectSubagents === true,
     inject: c.inject !== false,
     scaffoldDocs: c.scaffoldDocs !== false,
     includeWorkspaceMemoryDoc: c.includeWorkspaceMemoryDoc !== false,
@@ -313,6 +317,7 @@ async function ensureRoot(state, config) {
       await writeFile(join(local, 'README.md'), scaffoldReadme(config), 'utf8').catch(() => {})
     }
     await scaffoldDocs(local, state, config)
+    await ensureSessionIndexFile(local)
     return local
   } catch (error) {
     warn(`工作区记忆目录不可写，改用备用目录：${error instanceof Error ? error.message : error}`)
@@ -325,6 +330,7 @@ async function ensureRoot(state, config) {
       await writeFile(join(fallback, 'README.md'), scaffoldReadme(config), 'utf8').catch(() => {})
     }
     await scaffoldDocs(fallback, state, config)
+    await ensureSessionIndexFile(fallback)
     return fallback
   }
 }
@@ -352,12 +358,67 @@ function scaffoldReadme(config) {
     '| --- | --- |',
     '| `MEMORY.md` | 长期事实、决定、偏好（agent 通过 `memory_note` 主动写入） |',
     '| `PROGRESS.md` | 任务进度与错误（agent 通过 `memory_note` 主动写入） |',
+    '| `index.md` | 会话索引（日期 + 会话短 id + 首条用户输入摘要，自动维护） |',
     '| `sessions/*.md` | 每个会话每轮自动记录的关键信息（用户要点、助手结论、工具、错误、todo 进度） |',
     '',
     `新会话开始时，会读取本目录内容并注入上下文（上限约 ${Math.round(config.maxInjectChars / 1000)}k 字符）。`,
     '删除本目录即等于清空该工作区的跨会话记忆。',
     '',
   ].join('\n')
+}
+
+/* ────────────────────────────── 会话索引 ────────────────────────────── */
+
+function sessionIndexHeader() {
+  return [
+    '# 会话索引',
+    '',
+    '> 由 dsh-memory 自动维护：每行一个会话（日期 会话短 id：首条用户输入摘要）。',
+    '> 用于让新会话发现更早的历史；细节用 memory_search 检索。',
+    '',
+  ].join('\n')
+}
+
+/** 从会话文件里取第一条真人用户输入，作为索引摘要。 */
+function firstUserLine(text) {
+  const match = /^- 用户：(.+?)\r?$/mu.exec(String(text ?? ''))
+  return match === null ? '' : match[1].trim()
+}
+
+/**
+ * 为已有会话文件补建索引（只在 index.md 缺失时做一次，最多 200 个文件）。
+ * 老工作区升级后不必等下一轮新会话才看到索引。
+ */
+async function ensureSessionIndexFile(dir) {
+  const indexPath = join(dir, INDEX_FILE)
+  if (await exists(indexPath)) return
+  const files = (await listSessionFiles(join(dir, 'sessions'))).slice(0, 200)
+  if (files.length === 0) return
+  const lines = []
+  for (const file of files) {
+    const text = await readIfExists(file.path)
+    const excerpt = clip(collapse(firstUserLine(text)), 80) || '（无文本）'
+    const slug = file.name.replace(/^\d{4}-\d{2}-\d{2}_/u, '').replace(/\.md$/u, '')
+    lines.push(`- ${file.name.slice(0, 10)} ${slug}：${excerpt}`)
+  }
+  try {
+    // listSessionFiles 是新→旧，索引用旧→新，后续 appendIndexLine 才能保持时间顺序。
+    await writeFile(indexPath, `${sessionIndexHeader()}${lines.reverse().join('\n')}\n`, 'utf8')
+  } catch (error) {
+    warn(`写入会话索引失败：${error instanceof Error ? error.message : error}`)
+  }
+}
+
+/** 会话第一次被记录时追加一行索引；同一个会话只写一次。 */
+async function appendIndexLine(state, buffer) {
+  const indexPath = join(state.dir, INDEX_FILE)
+  const slug = str(state.slug, sessionSlug(state.sessionId))
+  const existing = await readIfExists(indexPath)
+  if (existing.includes(` ${slug}：`)) return
+  const first = collapse(buffer.users[0] ?? '')
+  const line = `- ${dayStamp(new Date(state.startedAt))} ${slug}：${clip(first, 80) || '（无文本）'}\n`
+  if (existing.trim() === '') await writeFile(indexPath, sessionIndexHeader(), 'utf8')
+  await appendFile(indexPath, line, 'utf8')
 }
 
 /* ────────────────────────────── 上下文组装 ────────────────────────────── */
@@ -385,12 +446,27 @@ function prettySessionName(fileName) {
 function latestHumanText(session) {
   try {
     if (session === undefined || session === null) return ''
-    const events = session.snapshotEvents()
-    for (let i = events.length - 1; i >= 0; i -= 1) {
-      const event = events[i]
-      if (event.type !== 'user/message' || event.data?.source?.kind !== 'user') continue
-      const text = messageText(event.data)
-      if (text !== '') return text
+    // 首选 deriveMessages()：surface 派生的消息历史里，user/message 的 data 原样保留 source。
+    // （session.snapshotEvents() 已被运行目标记为 deprecated，不再作为新调用使用。）
+    if (typeof session.deriveMessages === 'function') {
+      const messages = session.deriveMessages()
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i]
+        if (message?.role !== 'user' || message.source?.kind !== 'user') continue
+        const text = messageText(message)
+        if (text !== '') return text
+      }
+      return ''
+    }
+    // 兼容旧运行时（存量逻辑）：deriveMessages 不可用时才退回事件快照。
+    if (typeof session.snapshotEvents === 'function') {
+      const events = session.snapshotEvents()
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const event = events[i]
+        if (event.type !== 'user/message' || event.data?.source?.kind !== 'user') continue
+        const text = messageText(event.data)
+        if (text !== '') return text
+      }
     }
   } catch {
     /* ignore */
@@ -532,6 +608,13 @@ async function buildDigest(state, config) {
     const progressBody = docBody(progressDoc)
     if (progressBody !== '') {
       include.push(`## 任务进度（${config.dirName}/PROGRESS.md）\n${clipTail(progressBody, 1600)}`)
+    }
+    // 会话索引：只给“有哪些历史会话”的导航线索，细节仍靠 memory_search 检索。
+    const indexBody = docBody(await readIfExists(join(dir, INDEX_FILE)))
+    if (indexBody !== '') {
+      include.push(
+        `## 会话索引（日期 会话短id：首条用户输入；细节用 memory_search 检索）\n${clipDoc(indexBody, 1200)}`,
+      )
     }
 
     if (config.injectMode === 'relevance') {
@@ -777,6 +860,10 @@ async function appendTurn(state, buffer, config) {
       if (state.writtenTurns.has(buffer.turn)) return
       await appendFile(state.sessionFile, entry, 'utf8')
       state.writtenTurns.add(buffer.turn)
+      if (state.indexed !== true) {
+        await appendIndexLine(state, buffer)
+        state.indexed = true
+      }
     })
     .catch((error) => warn(`写入会话记录失败：${error instanceof Error ? error.message : error}`))
   return state.writeChain
@@ -904,6 +991,7 @@ export function apply(ctx, rawConfig) {
         sessionFile: '',
         sessionHeaderWritten: false,
         writtenTurns: null,
+        indexed: false,
       }
 
       const cachedRoot = memoryRootCache.get(cwd)
@@ -913,8 +1001,11 @@ export function apply(ctx, rawConfig) {
       const dispose = agentCtx.effect(() => {
         const disposers = []
         try {
-          if (config.inject) {
-            const prompt = agentCtx.systemPrompt
+          if (config.inject && (state.isRoot || config.injectSubagents)) {
+            // 通过 ctx.get 取服务，避免依赖调用链上某个祖先 fiber 是否 inject 了 systemPrompt；
+            // 拿不到时退回属性访问（兼容旧运行时）。
+            const prompt =
+              typeof agentCtx.get === 'function' ? agentCtx.get('systemPrompt') : agentCtx.systemPrompt
             if (prompt !== undefined && prompt !== null && typeof prompt.context === 'function') {
               disposers.push(
                 prompt.context({
