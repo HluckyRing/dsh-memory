@@ -1,0 +1,30 @@
+#!/bin/sh
+# pre-commit —— 密钥/私有信息守卫的入口；规则本体是同目录的 check-secrets.mjs。
+#
+# 用法（仓库内版本化，推荐）：
+#     git config core.hooksPath .githooks
+#
+# 环境限制：DSH agent 沙箱里 MSYS 的 sh.exe 可能起不来，钩子会以
+# "couldn't create signal pipe" 失败。那种情况下先手动跑
+#     node .githooks/check-secrets.mjs
+# 自查通过后，再用 `git commit --no-verify` 提交。
+
+set -u
+
+if ! command -v node >/dev/null 2>&1; then
+	echo "⚠ pre-commit: 找不到 node，密钥守卫已跳过 —— 请自查后再提交" >&2
+	exit 0
+fi
+
+for checker in \
+	"${0%/*}/check-secrets.mjs" \
+	"$(git rev-parse --git-dir 2>/dev/null)/hooks/check-secrets.mjs" \
+	"$(git rev-parse --show-toplevel 2>/dev/null)/.githooks/check-secrets.mjs"
+do
+	if [ -f "$checker" ]; then
+		exec node "$checker"
+	fi
+done
+
+echo "⚠ pre-commit: 找不到 check-secrets.mjs，密钥守卫已跳过 —— 请自查后再提交" >&2
+exit 0

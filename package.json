@@ -1,0 +1,54 @@
+{
+  "name": "dsh-memory",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness plain-text memory: auto-records every turn of a workspace into .dsh-memory/, injects the relevant history into new sessions, and exposes memory_note / memory_search / memory_status tools.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "memory",
+    "workspace-memory",
+    "context",
+    "markdown",
+    "plain-text",
+    "agent-memory"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/selftest.mjs",
+    "check:syntax": "node --check index.js",
+    "check:secrets": "node .githooks/check-secrets.mjs",
+    "check": "npm run check:syntax && npm run check:secrets && npm test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HluckyRing/dsh-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HluckyRing/dsh-memory/issues"
+  },
+  "homepage": "https://github.com/HluckyRing/dsh-memory#readme",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

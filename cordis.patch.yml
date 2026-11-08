@@ -1,0 +1,38 @@
+# dsh-memory —— 安装行（bundle patch）。
+#
+# `plugin_manager` 的 install_bundle 会把这一段插进当前 profile：
+#   - 行 id 是 `dsh-memory`（要覆盖配置就按这个 id 在 profile 的 cordis.patch.yml 里写同名行）
+#   - 本包自带默认配置，profile 只需覆盖想改的字段
+#
+# 完整字段说明见 docs/CONFIG.md。
+- insert:
+    - id: dsh-memory
+      name: dsh-memory
+      config:
+        # 记忆目录名（相对工作区根）。
+        dirName: .dsh-memory
+        # 每轮自动记录 / 会话开始时自动读取。
+        capture: true
+        inject: true
+        # 是否把子代理会话也单独记录（默认否，避免噪音）。
+        captureSubagents: false
+        # 新工作区自动创建 MEMORY.md / PROGRESS.md 骨架（只补缺失文件，不覆盖内容）。
+        scaffoldDocs: true
+        # 是否同时注入工作区根目录既有的 MEMORY.md。
+        includeWorkspaceMemoryDoc: true
+        # 注入方式：relevance=按本轮问题本地关键词打分挑选历史块；recent=固定取最近会话。
+        injectMode: relevance
+        # 注入上下文总上限（字符）。
+        maxInjectChars: 8000
+        # recent 模式：取最近几个历史会话 × 每个会话最近几轮。
+        recentSessions: 2
+        recentTurns: 3
+        # relevance 模式：扫描多少个会话文件；始终保留最近几块。
+        relevanceScanSessions: 20
+        relevanceKeepRecent: 1
+        # 单条文本截断上限（字符）。
+        userTextLimit: 500
+        assistantTextLimit: 700
+        sessionTextLimit: 900
+        # 工作区不可写时的备用目录（留空 = ~/.dsh/dsh-memory/<名字>-<hash>）。
+        fallbackDir: ''

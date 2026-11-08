@@ -1,0 +1,8 @@
+# 统一行尾：仓库内一律 LF，检出到 Windows 也不转换成 CRLF。
+# 这样 .githooks/pre-commit 这类 shell 脚本在任何平台都不会因为 CRLF 坏掉。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary

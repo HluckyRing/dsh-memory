@@ -1,0 +1,79 @@
+# ============================================================
+# .gitignore —— 隐私与敏感信息防线
+# 被忽略的内容一律不得进入版本库。
+# ============================================================
+
+# ---------- 插件运行时数据：本工作区跨会话记忆 ----------
+# 里面是你和 agent 的真实对话摘要、绝对路径、可能出现的密钥。
+# 一份都不许进库（插件也会在目录内写 .gitignore = *）。
+.dsh-memory/
+.dsh-memory
+archive/
+.archive/
+
+# ---------- 依赖与构建产物 ----------
+node_modules/
+dist/
+build/
+coverage/
+*.tgz
+*.zip
+_probe/
+
+# ---------- 临时 / 备份文件 ----------
+*.tmp
+*.bak
+*.bak-*
+*.orig
+*.rej
+*~
+
+# ---------- 本地私有笔记 ----------
+*.local.md
+AGENTS.local.md
+CLAUDE.local.md
+notes.local.*
+
+# ---------- 密钥 / 环境变量 / 凭据 ----------
+.env
+.env.*
+*.env
+*.local
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets.json
+credentials.json
+*token*.json
+service-account*.json
+.npmrc
+.pypirc
+.netrc
+id_rsa*
+id_ed25519*
+known_hosts
+
+# ---------- 系统与编辑器 ----------
+.DS_Store
+.DS_Store?
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+.vscode/
+.idea/
+*.swp
+
+# ---------- 日志 ----------
+*.log
+logs/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# ---------- 本机个人路径痕迹 ----------
+# 插件不写这些东西；如果不小心手改了，先自查再提交。
+# 例：C:\Users\<你的用户名>\...
+# 提交前一定先跑：node .githooks/check-secrets.mjs

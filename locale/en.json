@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Workspace Session Memory",
+    "description": "Remembers each workspace across sessions: logs every turn's key points, task progress and errors as plain text, and injects recent memory into new sessions."
+  }
+}
