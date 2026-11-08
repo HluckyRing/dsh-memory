@@ -20,7 +20,7 @@
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
-import { basename, join, resolve as resolvePath } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 
 export const name = 'dsh-memory'
 export const inject = ['agents', 'tools']
@@ -28,6 +28,8 @@ export const inject = ['agents', 'tools']
 const LOG_PREFIX = '[dsh-memory]'
 const MEMORY_DIR = '.dsh-memory'
 const CONTEXT_NAME = 'dsh-memory'
+/** 单条 memory_note 文本上限：超过就截断并标记，避免一条大 note 挤掉其他记忆 */
+const NOTE_TEXT_LIMIT = 2000
 
 const DEFAULTS = {
   /** 工作区内存目录名（相对工作区根） */
@@ -164,6 +166,16 @@ const escapeMemoryTags = (text) =>
   String(text ?? '').replace(/<(\/?)(dsh_memory)>/giu, '&lt;$1$2&gt;')
 
 /**
+ * 记忆文件的展示路径：工作区内的文件用相对路径（如 `.dsh-memory/MEMORY.md`），
+ * 工作区外（fallback / 自定义 fallbackDir）用绝对路径，避免报告一个不存在的假路径。
+ */
+function displayPath(cwd, path) {
+  const rel = relative(cwd, path)
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return path
+  return rel.replace(/\\/gu, '/')
+}
+
+/**
  * 文档正文：去掉空行、Markdown 标题（#）与引用/说明行（>）。
  * 骨架文件只有标题和说明，正文为空时不应注入上下文。
  */
@@ -286,6 +298,12 @@ async function ensureRoot(state, config) {
     warn(`工作区记忆目录不可写，改用备用目录：${error instanceof Error ? error.message : error}`)
     const fallback = fallbackRoot(cwd, config)
     await mkdir(join(fallback, 'sessions'), { recursive: true })
+    // 备用目录也做同样的隐私与说明守卫：数据不进 git、目录用途可读。
+    const ignore = join(fallback, '.gitignore')
+    if (!(await exists(ignore))) await writeFile(ignore, '*\n', 'utf8').catch(() => {})
+    if (!(await exists(join(fallback, 'README.md')))) {
+      await writeFile(join(fallback, 'README.md'), scaffoldReadme(config), 'utf8').catch(() => {})
+    }
     await scaffoldDocs(fallback, state, config)
     return fallback
   }
@@ -702,6 +720,14 @@ function sessionHeader(state) {
   ].join('\n')
 }
 
+/** 从已有会话文件恢复「已写轮次」：本次运行只需读一次文件，之后走内存 Set。 */
+async function writtenTurnsOf(path) {
+  const turns = new Set()
+  const text = await readIfExists(path)
+  for (const match of text.matchAll(/^## 第 (\d+) 轮 ·/gmu)) turns.add(Number(match[1]))
+  return turns
+}
+
 async function appendTurn(state, buffer, config) {
   const entry = buildTurnEntry(buffer, config)
   state.writeChain = (state.writeChain ?? Promise.resolve())
@@ -720,10 +746,14 @@ async function appendTurn(state, buffer, config) {
         }
         state.sessionHeaderWritten = true
       }
-      // 去重：同一会话的轮次号唯一。插件双实例（热重载/快速开关）或事件重放
-      // 都可能让 turn/end 被处理两次，已写过的轮次不再追加。
-      if ((await readIfExists(state.sessionFile)).includes(`\n## 第 ${buffer.turn} 轮 ·`)) return
+      // 去重：同一会话的轮次号唯一。已写轮次在首次写入时从文件恢复一次，之后只查内存 Set，
+      // 不再每轮读整份会话文件（长会话下是 O(n²) 读取）。插件中途重载也能靠恢复正确去重。
+      if (state.writtenTurns === undefined || state.writtenTurns === null) {
+        state.writtenTurns = await writtenTurnsOf(state.sessionFile)
+      }
+      if (state.writtenTurns.has(buffer.turn)) return
       await appendFile(state.sessionFile, entry, 'utf8')
+      state.writtenTurns.add(buffer.turn)
     })
     .catch((error) => warn(`写入会话记录失败：${error instanceof Error ? error.message : error}`))
   return state.writeChain
@@ -850,6 +880,7 @@ export function apply(ctx, rawConfig) {
         refreshChain: Promise.resolve(),
         sessionFile: '',
         sessionHeaderWritten: false,
+        writtenTurns: null,
       }
 
       const cachedRoot = memoryRootCache.get(cwd)
@@ -966,15 +997,24 @@ export function apply(ctx, rawConfig) {
           ok: { type: 'boolean' },
           file: { type: 'string' },
           kind: { type: 'string' },
+          truncated: { type: 'boolean' },
         },
       },
       render: (_args, value) => [
-        { type: 'text', text: `已记录到工作区记忆：${value.file}（${value.kind}）` },
+        {
+          type: 'text',
+          text: `已记录到工作区记忆：${value.file}（${value.kind}）${
+            value.truncated === true ? `（原文超过 ${NOTE_TEXT_LIMIT} 字符，已截断）` : ''
+          }`,
+        },
       ],
     },
     async execute(args, exec) {
-      const text = typeof args?.text === 'string' ? args.text.trim() : ''
-      if (text === '') throw new Error('memory_note requires non-empty text')
+      const raw = typeof args?.text === 'string' ? args.text.trim() : ''
+      if (raw === '') throw new Error('memory_note requires non-empty text')
+      // 单条 note 过长会长期占满注入预算、挤掉其他记忆，所以截断并在返回值里标记。
+      const truncated = raw.length > NOTE_TEXT_LIMIT
+      const text = truncated ? `${raw.slice(0, NOTE_TEXT_LIMIT)}…` : raw
       const kind = KINDS.includes(args?.kind) ? args.kind : 'note'
       const title = typeof args?.title === 'string' ? args.title.trim() : ''
       const agent = exec?.agent ?? ctx.agents.currentInitiator()
@@ -988,7 +1028,7 @@ export function apply(ctx, rawConfig) {
       const line = `- ${stamp()} [${label}] ${title !== '' ? `${title}：` : ''}${collapse(text)}\n`
       await appendFile(file, line, 'utf8')
       await refreshDigest(state)
-      return { ok: true, file: `${config.dirName}/${target}`, kind }
+      return { ok: true, file: displayPath(state.cwd, file), kind, truncated }
     },
     presentCall: (args) => ({
       card: 'generic',
@@ -1086,14 +1126,12 @@ export function apply(ctx, rawConfig) {
           continue
         }
         if (text === '') continue
-        const relative = path.startsWith(state.dir)
-          ? join(config.dirName, path.slice(state.dir.length).replace(/^[/\\]+/u, ''))
-          : 'MEMORY.md'
+        const file = displayPath(state.cwd, path)
         const lines = text.split(/\r?\n/u)
         for (let i = 0; i < lines.length; i += 1) {
           if (!lines[i].toLowerCase().includes(needle)) continue
           matches.push({
-            file: relative.replace(/\\/gu, '/'),
+            file,
             line: i + 1,
             text: clip(collapse(lines[i]), 300),
           })
@@ -1196,7 +1234,7 @@ export function apply(ctx, rawConfig) {
         tracked: installed.has(agent) || installed.has(state.agent),
         capture: state.capture,
         session: state.sessionId,
-        file: state.sessionFile === '' ? '' : join(config.dirName, 'sessions', basename(state.sessionFile)),
+        file: state.sessionFile === '' ? '' : displayPath(state.cwd, state.sessionFile),
         bufferHuman: state.buffer?.human === true,
         eventCount: state.eventCount ?? 0,
         injectMode: config.injectMode,
@@ -1267,4 +1305,8 @@ export const __test = {
   scoreTerms,
   docBody,
   clip,
+  clipDoc,
+  clipTail,
+  displayPath,
+  NOTE_TEXT_LIMIT,
 }

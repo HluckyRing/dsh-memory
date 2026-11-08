@@ -148,7 +148,7 @@ plugin_manager(action: "install_bundle", target: "D:\\vibe-coding\\plugin\\dsh-m
 
 | 工具 | 作用 |
 | --- | --- |
-| `memory_note` | 把一条内容写进本工作区的 `MEMORY.md` / `PROGRESS.md`。参数：`text`（必需）、`kind`（`note`/`fact`/`decision`/`preference` 进 MEMORY，`progress`/`error`/`todo` 进 PROGRESS）、`title` |
+| `memory_note` | 把一条内容写进本工作区的 `MEMORY.md` / `PROGRESS.md`。参数：`text`（必需）、`kind`（`note`/`fact`/`decision`/`preference` 进 MEMORY，`progress`/`error`/`todo` 进 PROGRESS）、`title`。单条上限 2000 字符，超出会截断并在返回里标记 `truncated: true` |
 | `memory_search` | 在 MEMORY / PROGRESS / sessions 里按关键字检索（大小写不敏感的子串匹配），返回命中位置 |
 | `memory_status` | 显示记忆目录、会话数、以及新会话将要看到的确切注入文本 |
 

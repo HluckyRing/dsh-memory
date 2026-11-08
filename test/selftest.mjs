@@ -442,6 +442,101 @@ try {
     assert.equal((digest.match(/<dsh_memory>/gu) ?? []).length, 1)
   })
 
+  await test('memory_note truncates oversized notes and reports a real path', async () => {
+    const tools = new Map()
+    const noteCwd = join(root, 'note-workspace')
+    const agent = {
+      id: 'agent-note-0001',
+      session: {
+        id: 'session-note-0001',
+        header: { cwd: noteCwd, createdAt: Date.now() },
+        snapshotEvents: () => [],
+      },
+      ctx: {
+        on: () => () => {},
+        effect: (fn) => {
+          fn()
+          return () => {}
+        },
+        systemPrompt: { context: () => () => {} },
+      },
+    }
+    const fakeCtx = {
+      on: () => () => {},
+      get: () => undefined,
+      agents: { roots: () => [agent], currentInitiator: () => undefined },
+      tools: {
+        register: (definition) => {
+          tools.set(definition.name, definition)
+          return () => {}
+        },
+      },
+    }
+    const dispose = mod.apply(fakeCtx, {})
+    try {
+      const note = tools.get('memory_note')
+      assert.ok(note, 'memory_note must be registered')
+      // apply() 里对已存在的 root agent 是异步 install，等它把 state 装好再调用工具
+      let result
+      for (let i = 0; i < 50; i += 1) {
+        try {
+          result = await note.execute({ text: 'X'.repeat(t.NOTE_TEXT_LIMIT + 500), kind: 'fact' }, { agent })
+          break
+        } catch (error) {
+          if (i === 49) throw error
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+      }
+      assert.equal(result.truncated, true)
+      assert.equal(result.file, '.dsh-memory/MEMORY.md')
+      const content = await readFile(join(noteCwd, '.dsh-memory', 'MEMORY.md'), 'utf8')
+      const lastLine = content.trim().split('\n').pop()
+      assert.ok(lastLine.length <= t.NOTE_TEXT_LIMIT + 120, `oversized note line: ${lastLine.length}`)
+      const small = await note.execute({ text: '短 note', kind: 'fact' }, { agent })
+      assert.equal(small.truncated, false)
+      assert.equal(small.file, '.dsh-memory/MEMORY.md')
+    } finally {
+      dispose()
+    }
+  })
+
+  await test('displayPath reports relative in-workspace and absolute fallback paths', () => {
+    const displayCwd = join(root, 'display-workspace')
+    assert.equal(t.displayPath(displayCwd, join(displayCwd, '.dsh-memory', 'MEMORY.md')), '.dsh-memory/MEMORY.md')
+    const outside = join(root, 'fallback-store', 'MEMORY.md')
+    assert.equal(t.displayPath(displayCwd, outside), outside)
+  })
+
+  await test('appendTurn restores written turns from an existing log', async () => {
+    const reloadFile = join(state.dir, 'sessions', '2026-10-20_reload01.md')
+    await writeFile(
+      reloadFile,
+      '# 会话记录 · 2026-10-20\n\n## 第 1 轮 · 2026-10-20 10:00:00\n- 用户：重启前的第一轮\n\n',
+      'utf8',
+    )
+    // 模拟插件中途重载：内存 Set 为空，但会话文件里已有第 1 轮
+    const fresh = { ...state, sessionFile: reloadFile, sessionHeaderWritten: true, writeChain: Promise.resolve(), writtenTurns: null }
+    const first = t.newBuffer(1)
+    t.applyEvent(first, {
+      type: 'user/message',
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: '重放的第一轮' }] },
+    })
+    first.reason = { kind: 'completed' }
+    await t.appendTurn(fresh, first, config)
+    const second = t.newBuffer(2)
+    t.applyEvent(second, {
+      type: 'user/message',
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: '重启后的第二轮' }] },
+    })
+    second.reason = { kind: 'completed' }
+    await t.appendTurn(fresh, second, config)
+    const text = await readFile(reloadFile, 'utf8')
+    assert.equal((text.match(/## 第 1 轮 ·/gu) ?? []).length, 1, 'existing turn must not be duplicated after reload')
+    assert.equal((text.match(/## 第 2 轮 ·/gu) ?? []).length, 1)
+    assert.match(text, /重启后的第二轮/u)
+    assert.doesNotMatch(text, /重放的第一轮/u)
+  })
+
   await test('the same session does not re-read its own log', async () => {
     const digest = await t.buildDigest(state, config)
     assert.doesNotMatch(digest, /第一轮用户输入/)

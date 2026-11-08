@@ -36,7 +36,7 @@ export function apply(ctx, rawConfig) { ... }
 
 - 收到 `turn/start` 时新建缓冲（并记下 `event.time` 作为本轮标题时间）；
 - 累积 `user/message`、`assistant/message`、`tool/call`、`tool/result`、`todo/write`；
-- 收到 `turn/end` 时落盘，并做**幂等保护**（同一轮只追加一次，防止重试 / 重复派发写两份）。
+- 收到 `turn/end` 时落盘，并做**幂等保护**（同一轮只追加一次，防止重试 / 重复派发写两份）。已写轮次在首次写入时从会话文件里恢复一次到内存 `Set`，之后只查 `Set`，不再每轮读取整份日志（长会话下从 O(n²) 降为 O(1)，插件中途重载也能正确去重）。
 
 ### 2. `recoverBuffer()`：中途接管也不丢本轮
 
