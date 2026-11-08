@@ -298,6 +298,73 @@ try {
     }
   })
 
+  await test('memory prompt context opts out of {{variable}} interpolation', async () => {
+    const captured = []
+    const contextCwd = join(root, 'context-workspace')
+    const agent = {
+      id: 'agent-context-0001',
+      session: {
+        id: 'session-context-0001',
+        header: { cwd: contextCwd, createdAt: Date.now() },
+        snapshotEvents: () => [],
+      },
+      ctx: {
+        on: () => () => {},
+        effect: (fn) => {
+          fn()
+          return () => {}
+        },
+        systemPrompt: {
+          context: (options) => {
+            captured.push(options)
+            return () => {}
+          },
+        },
+      },
+    }
+    const fakeCtx = {
+      on: () => () => {},
+      get: () => undefined,
+      agents: { roots: () => [agent], currentInitiator: () => undefined },
+      tools: { register: () => () => {} },
+    }
+    const dispose = mod.apply(fakeCtx, {})
+    try {
+      // apply() 里对已存在的 root agent 是 `void install(agent)`，等它跑完注册。
+      for (let i = 0; i < 50 && captured.length === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      assert.equal(captured.length, 1, 'memory context must be registered exactly once')
+      const context = captured[0]
+      assert.equal(context.name, 'dsh-memory')
+      assert.equal(context.order, 1000)
+      assert.equal(typeof context.text, 'function')
+      // 关键回归：system-prompt 默认会对 context 文本做 {{变量}} 插值，未知变量会抛错，
+      // 让该轮 agent turn 直接失败。记忆文本必须按原文注入，所以必须显式关掉插值。
+      assert.equal(context.interpolate, false, 'memory context must set interpolate:false')
+    } finally {
+      dispose()
+    }
+  })
+
+  await test('memory text containing {{...}} is injected verbatim', async () => {
+    const braceCwd = join(root, 'brace-workspace')
+    const braceState = {
+      ...state,
+      cwd: braceCwd,
+      dir: await t.ensureRoot({ ...state, cwd: braceCwd }, config),
+      sessionId: 'session-brace-0001',
+    }
+    await writeFile(
+      join(braceState.dir, 'MEMORY.md'),
+      '# 长期记忆\n\n- 2026-11-08 [事实] 模板 {{ user.name }} 与动作 ${{ github.sha }} 都要原样保留\n',
+      'utf8',
+    )
+    const digest = await t.buildDigest(braceState, config)
+    assert.match(digest, /\{\{ user\.name \}\}/)
+    assert.match(digest, /\$\{\{ github\.sha \}\}/)
+  })
+
   await test('the same session does not re-read its own log', async () => {
     const digest = await t.buildDigest(state, config)
     assert.doesNotMatch(digest, /第一轮用户输入/)

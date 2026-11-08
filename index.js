@@ -826,6 +826,9 @@ export function apply(ctx, rawConfig) {
                 prompt.context({
                   name: CONTEXT_NAME,
                   order: 1000,
+                  // 记忆文本一律按原文注入：system-prompt 默认会把 context 里的
+                  // `{{...}}` 当模板变量解析，未知变量会直接抛错并让该轮失败。
+                  interpolate: false,
                   text: () => state.digest,
                 }),
               )
