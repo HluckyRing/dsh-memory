@@ -124,6 +124,45 @@ function clip(text, max) {
   return `${value.slice(0, max)}…`
 }
 
+const OMIT_MARKER = '…（中间内容已省略，完整内容可用 memory_search 检索）…'
+
+/**
+ * 保留开头 + 结尾的截断：适用于「头部有约定、尾部在追加」的文档（MEMORY.md）。
+ * 只保开头会让 memory_note 追加在末尾的新条目永远进不了注入。
+ */
+function clipDoc(text, max) {
+  const value = String(text ?? '')
+  if (value.length <= max) return value
+  const marker = `\n${OMIT_MARKER}\n`
+  const room = max - marker.length
+  if (room <= 40) return clipTail(value, max)
+  const head = Math.floor(room * 0.3)
+  // 尽量在换行处断开，避免把半行内容留在省略标记两侧
+  const headBreak = value.lastIndexOf('\n', head)
+  const headEnd = headBreak > head / 2 ? headBreak : head
+  let tailStart = value.length - (room - head)
+  const tailBreak = value.indexOf('\n', tailStart)
+  if (tailBreak >= 0 && tailBreak - tailStart < 120) tailStart = tailBreak + 1
+  return `${value.slice(0, headEnd)}${marker}${value.slice(tailStart)}`
+}
+
+/** 保留结尾的截断：适用于追加写入的日志（PROGRESS.md 最新在末尾）。 */
+function clipTail(text, max) {
+  const value = String(text ?? '')
+  if (value.length <= max) return value
+  const marker = `${OMIT_MARKER}\n`
+  const room = max - marker.length
+  if (room <= 0) return value.slice(-max)
+  let start = value.length - room
+  const lineBreak = value.indexOf('\n', start)
+  if (lineBreak >= 0 && lineBreak - start < 120) start = lineBreak + 1
+  return `${marker}${value.slice(start)}`
+}
+
+/** 记忆文本里的标签不能伪造注入块边界（`</dsh_memory>` 等） */
+const escapeMemoryTags = (text) =>
+  String(text ?? '').replace(/<(\/?)(dsh_memory)>/giu, '&lt;$1$2&gt;')
+
 /**
  * 文档正文：去掉空行、Markdown 标题（#）与引用/说明行（>）。
  * 骨架文件只有标题和说明，正文为空时不应注入上下文。
@@ -363,7 +402,7 @@ async function recentHistorySections(state, config) {
     if (blocks.length === 0) continue
     sections.push(
       `### 历史会话 ${prettySessionName(file.name)}\n${blocks
-        .map((block) => clip(block.trim(), config.sessionTextLimit))
+        .map((block) => clipDoc(block.trim(), config.sessionTextLimit))
         .join('\n\n')}`,
     )
   }
@@ -420,7 +459,7 @@ async function relevanceHistorySections(state, config, query) {
     sections: [...grouped.entries()].map(
       ([file, blocks]) =>
         `### 历史会话 ${prettySessionName(file)}\n${blocks
-          .map((block) => clip(block.text.trim(), config.sessionTextLimit))
+          .map((block) => clipDoc(block.text.trim(), config.sessionTextLimit))
           .join('\n\n')}`,
     ),
     mode: 'related',
@@ -440,18 +479,18 @@ async function buildDigest(state, config) {
       const rootMemory = await readIfExists(join(cwd, 'MEMORY.md'))
       // 只有骨架/标题的不算内容，避免把空模板注入上下文
       if (docBody(rootMemory) !== '') {
-        include.push(`## 工作区根目录 MEMORY.md（既有约定）\n${clip(rootMemory.trim(), 2000)}`)
+        include.push(`## 工作区根目录 MEMORY.md（既有约定）\n${clipDoc(rootMemory.trim(), 2000)}`)
       }
     }
     const memoryDoc = await readIfExists(join(dir, 'MEMORY.md'))
     const memoryBody = docBody(memoryDoc)
     if (memoryBody !== '') {
-      include.push(`## 长期记忆（${config.dirName}/MEMORY.md）\n${clip(memoryBody, 3000)}`)
+      include.push(`## 长期记忆（${config.dirName}/MEMORY.md）\n${clipDoc(memoryBody, 3000)}`)
     }
     const progressDoc = await readIfExists(join(dir, 'PROGRESS.md'))
     const progressBody = docBody(progressDoc)
     if (progressBody !== '') {
-      include.push(`## 任务进度（${config.dirName}/PROGRESS.md）\n${clip(progressBody, 1600)}`)
+      include.push(`## 任务进度（${config.dirName}/PROGRESS.md）\n${clipTail(progressBody, 1600)}`)
     }
 
     if (config.injectMode === 'relevance') {
@@ -489,13 +528,14 @@ async function buildDigest(state, config) {
   const tail = ['', footer, '</dsh_memory>']
   let budget = config.maxInjectChars - (head.join('\n').length + tail.join('\n').length)
   const kept = []
-  for (const section of include) {
+  const sections = include.map(escapeMemoryTags)
+  for (const section of sections) {
     if (budget <= 0) break
     const piece = budget >= section.length ? section : clip(section, budget)
     kept.push(piece)
     budget -= piece.length
   }
-  if (kept.length < include.length) kept.push('…（更多历史记录已省略，可用 memory_search 检索）')
+  if (kept.length < sections.length) kept.push('…（更多历史记录已省略，可用 memory_search 检索）')
   return [...head, kept.join('\n\n'), ...tail].join('\n')
 }
 

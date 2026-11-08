@@ -8,6 +8,8 @@
 
 ### 修复
 - **记忆里的 `{{...}}` 会让整轮会话失败**：注入用的 `systemPrompt.context` 注册现在传 `interpolate: false`。`system-prompt` 默认对 context 文本做 `{{变量}}` 插值，MEMORY / PROGRESS / 历史会话里一旦出现成对 `{{...}}`（Vue/Handlebars 模板、GitHub Actions 的 `${{ }}`、代码片段），prompt 组装会抛 `unknown/malformed prompt variable`，该轮 turn 直接报错且不修文件就每轮复发；现在记忆文本一律按原文注入。自检新增两条断言锁定该行为。
+- **截断方向导致新记忆静默失效**：`MEMORY.md` / 工作区根 `MEMORY.md` 超上限时改为保留「开头 + 最新部分」、`PROGRESS.md` 保留最新部分，并插入 `…（中间内容已省略，完整内容可用 memory_search 检索）…` 标记；历史轮次块同样保留两端（轮次标题 + 用户要点 / 助手结论 + 错误 + 状态）。此前只保开头，`memory_note` 追加在末尾的新条目永远进不了注入。
+- **注入块边界可伪造**：digest 内来自记忆文件的内容会把 `<dsh_memory>` / `</dsh_memory>` 转义成 `&lt;…&gt;`，克隆来的仓库根 `MEMORY.md` 或手工编辑的文件不能再把伪造指令放到块外。
 
 ## [1.0.0] - 2026-11-08
 
