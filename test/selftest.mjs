@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict'
 import { appendFile, mkdir, mkdtemp, readFile, stat, writeFile, rm, utimes } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const root = await mkdtemp(join(tmpdir(), 'dsh-memory-selftest-'))
@@ -187,13 +187,49 @@ try {
     assert.match(digest, /\n\n### 历史会话/)
   })
 
-  await test('queryTerms splits Chinese bigrams and ASCII words', () => {
+  await test('queryTerms splits Chinese bigrams and ASCII words, dropping stopwords', () => {
     const terms = t.queryTerms('数据库迁移 Database Migration 失败')
     for (const expected of ['数据', '据库', '库迁', '迁移', '失败', 'database', 'migration']) {
       assert.ok(terms.includes(expected), `missing term ${expected}: ${terms.join(',')}`)
     }
     assert.equal(t.scoreTerms('数据库迁移失败', ['迁移', '样式']), 1)
     assert.equal(t.scoreTerms('数据库迁移失败', []), 0)
+    // 高频功能词不应进入查询词：否则「怎么办」「继续」会把所有历史块打成同分
+    const short = t.queryTerms('怎么办 继续 the how')
+    for (const excluded of ['怎么', '继续', 'the', 'how']) {
+      assert.ok(!short.includes(excluded), `stopword ${excluded} should be dropped: ${short.join(',')}`)
+    }
+  })
+
+  await test('relevance scoring decays older blocks by half-life', () => {
+    const now = Date.now()
+    const day = 86400000
+    assert.equal(t.decayFactor(now, now, 30), 1)
+    assert.ok(Math.abs(t.decayFactor(now - 30 * day, now, 30) - 0.5) < 0.01)
+    assert.ok(Math.abs(t.decayFactor(now - 60 * day, now, 30) - 0.25) < 0.01)
+    assert.equal(t.decayFactor(now - 365 * day, now, 0), 1, 'halfLife=0 disables decay')
+  })
+
+  await test('tool error detail is redacted before it reaches the session log', () => {
+    const buffer = t.newBuffer(1)
+    t.applyEvent(buffer, {
+      type: 'user/message',
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: '跑一下测试' }] },
+    })
+    t.applyEvent(buffer, { type: 'tool/call', data: { callId: 'c9', name: 'pwsh', arguments: '{}' } })
+    t.applyEvent(buffer, {
+      type: 'tool/result',
+      data: {
+        error: { reason: `git clone https://x sk-${'a'.repeat(32)} failed in ${homedir()}` },
+        message: { role: 'tool', source: { kind: 'tool', callId: 'c9' }, content: [], isError: true },
+      },
+    })
+    const entry = t.buildTurnEntry(buffer, config)
+    assert.doesNotMatch(entry, /sk-a{16}/u, 'raw token must not be written')
+    assert.match(entry, /sk-\*\*\*/u)
+    assert.match(entry, /~/u, 'home directory should be replaced with ~')
+    const escapedHome = homedir().replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+    assert.doesNotMatch(entry, new RegExp(escapedHome, 'iu'))
   })
 
   await test('relevance mode picks a matching older session over a newer unrelated one', async () => {
@@ -511,6 +547,24 @@ try {
       const small = await note.execute({ text: '短 note', kind: 'fact' }, { agent })
       assert.equal(small.truncated, false)
       assert.equal(small.file, '.dsh-memory/MEMORY.md')
+      // 查重：同一 kind 下正文相同不重复写
+      const duplicate = await note.execute({ text: '短 note', kind: 'fact' }, { agent })
+      assert.equal(duplicate.duplicate, true)
+      const after = await readFile(join(noteCwd, '.dsh-memory', 'MEMORY.md'), 'utf8')
+      assert.equal((after.match(/短 note/gu) ?? []).length, 1)
+
+      // memory_search / memory_status 的 execute 路径也要有覆盖
+      const search = tools.get('memory_search')
+      assert.ok(search, 'memory_search must be registered')
+      const found = await search.execute({ query: '短 note' }, { agent })
+      assert.ok(found.matches.length >= 1, 'search must find the note')
+      assert.equal(found.matches[0].file, '.dsh-memory/MEMORY.md')
+      const status = tools.get('memory_status')
+      assert.ok(status, 'memory_status must be registered')
+      const report = await status.execute({}, { agent })
+      assert.equal(report.dir, join(noteCwd, '.dsh-memory'))
+      assert.ok(report.digestChars > 0)
+      assert.match(report.digest, /短 note/u)
     } finally {
       dispose()
     }
@@ -733,6 +787,12 @@ try {
     assert.match(indexText, /旧会话的回填关键字/u)
     const digest = await t.buildDigest({ ...state, cwd: backfillCwd, dir, sessionId: 'session-new-0003' }, config)
     assert.match(digest, /会话索引/u)
+  })
+
+  await test('injectRefresh defaults to turn and accepts session', () => {
+    assert.equal(t.resolveConfig({}).injectRefresh, 'turn')
+    assert.equal(t.resolveConfig({ injectRefresh: 'session' }).injectRefresh, 'session')
+    assert.equal(t.resolveConfig({ injectRefresh: 'bogus' }).injectRefresh, 'turn')
   })
 
   await test('digest is capped by maxInjectChars', async () => {

@@ -32,6 +32,10 @@
         # relevance 模式：扫描多少个会话文件；始终保留最近几块。
         relevanceScanSessions: 20
         relevanceKeepRecent: 1
+        # relevance 打分的时间衰减半衰期（天）；0 = 不衰减。
+        relevanceHalfLifeDays: 30
+        # 注入刷新时机：turn=每轮重建（默认）；session=会话开始构建一次（利于 prompt 前缀缓存）。
+        injectRefresh: turn
         # 单条文本截断上限（字符）。
         userTextLimit: 500
         assistantTextLimit: 700

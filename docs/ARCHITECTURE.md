@@ -44,7 +44,7 @@ export function apply(ctx, rawConfig) { ... }
 
 ### 3. 上下文用 `systemPrompt.context()` 动态组装
 
-注册一个按会话作用域的 dynamic context，其文本由 `buildDigest()` 在每次请求前从磁盘现组装 —— 所以其他会话刚写的记忆，本轮就能看到，不需要重启也不需要缓存失效逻辑。
+注册一个按会话作用域的 dynamic context，其文本由 `buildDigest()` 在每次请求前从磁盘现组装 —— 所以其他会话刚写的记忆，本轮就能看到，不需要重启也不需要缓存失效逻辑。`injectRefresh: session`（可选）把构建时机改成「会话开始一次」，省掉每轮重算，并让 system prompt 前缀保持稳定（利于做前缀缓存的 provider）；代价是相关度不随本轮问题变化。
 
 `agentCtx.effect()` 持有注册：插件卸载或会话销毁时自动撤销，不留悬挂的上下文。
 
@@ -57,9 +57,10 @@ export function apply(ctx, rawConfig) { ... }
 
 ### 5. `relevance` 打分（纯本地）
 
-- `queryTerms()` 把本轮用户输入切成「中文相邻二字组 + 英文词」；
+- `queryTerms()` 把本轮用户输入切成「中文相邻二字组 + 英文词」，并剔除中英文高频停用词（`是吗`、`怎么`、`如何`、`the`、`how`…）；
 - `scoreTerms()` 统计命中**不同**词的个数（同一词重复出现不加分）；
-- 对所有历史轮次块打分，同分按时间新→旧；最近 `relevanceKeepRecent` 块无条件保留；
+- 每个块的得分再乘以基于文件 mtime 的时间衰减系数（`relevanceHalfLifeDays`，默认 30 天，`0` = 不衰减）；
+- 对所有历史轮次块按衰减后的得分排序，同分按时间新→旧；最近 `relevanceKeepRecent` 块无条件保留；
 - 查询为空或全部 0 分时退回 `recent` 模式。
 
 不调用模型、不发网络请求。

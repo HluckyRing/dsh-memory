@@ -35,6 +35,8 @@
 | `recentTurns` | number | `3` | 1–10 | `recent` 模式：每个历史会话注入最近几轮 |
 | `relevanceScanSessions` | number | `20` | 1–200 | `relevance` 模式：最多扫描多少个会话文件 |
 | `relevanceKeepRecent` | number | `1` | 0–5 | `relevance` 模式：无条件保留的最近轮次块数量，保证上下文连贯 |
+| `relevanceHalfLifeDays` | number | `30` | 0–3650 | `relevance` 打分的时间衰减半衰期（天）；`0` = 不衰减。老块权重 = 命中数 × 0.5^(年龄天数 / 半衰期) |
+| `injectRefresh` | string | `turn` | `turn` \| `session` | 注入刷新时机：`turn` 每轮重建（相关度跟随本轮问题）；`session` 会话开始构建一次（省重算、利于 prompt 前缀缓存，但相关度不随本轮问题变化） |
 | `userTextLimit` | number | `500` | 80–4000 | 单条用户文本记录上限（字符） |
 | `assistantTextLimit` | number | `700` | 80–8000 | 单条助手文本记录上限（字符） |
 | `sessionTextLimit` | number | `900` | 120–8000 | 注入时每个历史会话块的上限（字符） |

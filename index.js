@@ -65,6 +65,10 @@ const DEFAULTS = {
   relevanceScanSessions: 20,
   /** relevance 模式始终保留的最近轮次块数量，保证上下文连贯 */
   relevanceKeepRecent: 1,
+  /** relevance 打分的时间衰减半衰期（天）；0 = 不衰减 */
+  relevanceHalfLifeDays: 30,
+  /** 注入刷新时机：turn=每轮重建（默认，相关度跟随本轮问题）；session=会话开始构建一次（省重算，利于 prompt 前缀缓存） */
+  injectRefresh: 'turn',
   /** 工作区不可写时的备用存放目录（留空则用 ~/.dsh/dsh-memory） */
   fallbackDir: '',
 }
@@ -131,6 +135,8 @@ function resolveConfig(raw) {
     injectMode: c.injectMode === 'recent' ? 'recent' : 'relevance',
     relevanceScanSessions: clampInt(c.relevanceScanSessions, DEFAULTS.relevanceScanSessions, 1, 200),
     relevanceKeepRecent: clampInt(c.relevanceKeepRecent, DEFAULTS.relevanceKeepRecent, 0, 5),
+    relevanceHalfLifeDays: clampInt(c.relevanceHalfLifeDays, DEFAULTS.relevanceHalfLifeDays, 0, 3650),
+    injectRefresh: c.injectRefresh === 'session' ? 'session' : 'turn',
     fallbackDir: str(c.fallbackDir),
   }
 }
@@ -190,6 +196,26 @@ function displayPath(cwd, path) {
   const rel = relative(cwd, path)
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return path
   return rel.replace(/\\/gu, '/')
+}
+
+const SECRET_PATTERNS = [
+  [/(\bsk-)[A-Za-z0-9_-]{16,}/gu, '$1***'],
+  [/ghp_[A-Za-z0-9]{20,}/gu, 'ghp_***'],
+  [/github_pat_[A-Za-z0-9_]{20,}/gu, 'github_pat_***'],
+  [/\bAKIA[0-9A-Z]{16}\b/gu, 'AKIA***'],
+  [/xox[baprs]-[A-Za-z0-9-]{10,}/gu, 'xox***'],
+]
+
+/** 错误文本脱敏：密钥串与家目录路径尽量不写进会话日志（尽力而为）。 */
+function redactSensitive(text) {
+  let value = String(text ?? '')
+  for (const [pattern, replacement] of SECRET_PATTERNS) value = value.replace(pattern, replacement)
+  const home = homedir()
+  if (home !== undefined && home !== null && home.length > 3) {
+    const escaped = home.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+    value = value.replace(new RegExp(escaped, 'giu'), '~')
+  }
+  return value
 }
 
 /**
@@ -475,20 +501,40 @@ function latestHumanText(session) {
 }
 
 /**
+ * 中文/英文高频功能词：不参与相关度打分。短查询（如「怎么办」「继续」）里
+ * 这类词几乎命中所有历史块，不剔除就会把无关内容打成同分。
+ */
+const STOP_TERMS = new Set([
+  '的', '了', '是', '在', '和', '与', '或', '也', '就', '都', '而', '及', '等', '被', '把', '对', '让',
+  '这', '那', '我', '你', '他', '她', '它', '们', '么', '呢', '吧', '啊', '呀',
+  '怎么', '什么', '为什', '为何', '哪些', '哪个', '如何', '可以', '能否', '是否', '怎样', '多少', '为什么',
+  '这个', '那个', '这些', '那些', '我们', '你们', '他们', '然后', '因为', '所以', '但是', '不过', '如果',
+  '已经', '现在', '一下', '一些', '还是', '就是', '没有', '不是', '这里', '那里', '时候', '问题', '一个',
+  '以及', '因此', '并且', '或者', '其实', '应该', '可能', '需要', '帮我', '请帮', '麻烦', '继续', '然后',
+  'the', 'and', 'for', 'with', 'this', 'that', 'you', 'are', 'was', 'were', 'have', 'has', 'had', 'not',
+  'but', 'what', 'how', 'why', 'can', 'could', 'should', 'would', 'please', 'help', 'from', 'into', 'about',
+  'there', 'here', 'they', 'them', 'your', 'our', 'its', 'will', 'just', 'than', 'then', 'when', 'where',
+])
+
+/**
  * 查询分词：英文/数字按词，中文按相邻二字切分（无需分词器，跨领域也够用）。
+ * 过滤高频功能词；每词只计命中与否，不做词频加权。
  * @param {string} text
  * @returns {string[]}
  */
 function queryTerms(text) {
   const terms = new Set()
   const lower = String(text ?? '').toLowerCase()
-  for (const word of lower.match(/[a-z0-9_]{2,}/gu) ?? []) terms.add(word)
+  const add = (term) => {
+    if (term !== '' && !STOP_TERMS.has(term)) terms.add(term)
+  }
+  for (const word of lower.match(/[a-z0-9_]{2,}/gu) ?? []) add(word)
   for (const run of lower.match(/[\u3400-\u9fff]+/gu) ?? []) {
     if (run.length === 1) {
-      terms.add(run)
+      add(run)
       continue
     }
-    for (let i = 0; i + 1 < run.length; i += 1) terms.add(run.slice(i, i + 2))
+    for (let i = 0; i + 1 < run.length; i += 1) add(run.slice(i, i + 2))
   }
   return [...terms].slice(0, 300)
 }
@@ -500,6 +546,13 @@ function scoreTerms(text, terms) {
   let hits = 0
   for (const term of terms) if (lower.includes(term)) hits += 1
   return hits
+}
+
+/** 时间衰减系数：半衰期（天）后的块权重减半；halfLife<=0 表示不衰减。 */
+function decayFactor(mtime, now, halfLife) {
+  if (!(halfLife > 0)) return 1
+  const ageDays = Math.max(0, (now - mtime) / 86400000)
+  return 0.5 ** (ageDays / halfLife)
 }
 
 /** recent 模式：最近几个会话 × 每个会话最近几轮。 */
@@ -535,18 +588,21 @@ async function relevanceHistorySections(state, config, query) {
     config.relevanceScanSessions + 1,
   )
   const terms = queryTerms(query)
+  const now = Date.now()
   const candidates = []
   for (const file of files) {
     const text = await readIfExists(file.path)
     if (text.trim() === '') continue
     if (isOwnSessionLog(text, state.sessionId)) continue
     splitTurnBlocks(text).forEach((block, index) => {
+      const score = scoreTerms(block, terms)
       candidates.push({
         file: file.name,
         mtime: file.mtime,
         index,
         text: block,
-        score: scoreTerms(block, terms),
+        score,
+        decayed: score * decayFactor(file.mtime, now, config.relevanceHalfLifeDays),
       })
     })
   }
@@ -562,7 +618,7 @@ async function relevanceHistorySections(state, config, query) {
   const anchored = new Set(keepRecent.map(keyOf))
   const ranked = candidates
     .filter((item) => !anchored.has(keyOf(item)))
-    .sort((a, b) => b.score - a.score || b.mtime - a.mtime || b.index - a.index)
+    .sort((a, b) => b.decayed - a.decayed || b.mtime - a.mtime || b.index - a.index)
   const ordered = [...keepRecent, ...ranked]
 
   // 同一会话的选中块合并到一个标题下；会话顺序按首次出现的名次。
@@ -728,11 +784,12 @@ function applyEvent(buffer, event) {
         const toolName = buffer.calls.get(callId) ?? 'tool'
         const failed = event.data?.error !== undefined || event.data?.message?.isError === true
         if (failed) {
-          const detail =
+          const detail = redactSensitive(
             event.data?.error?.reason ??
-            event.data?.error?.code ??
-            messageText(event.data?.message) ??
-            ''
+              event.data?.error?.code ??
+              messageText(event.data?.message) ??
+              '',
+          )
           buffer.errors.push({ name: toolName, detail: clip(collapse(detail), 220) })
         }
         return
@@ -926,7 +983,9 @@ export function apply(ctx, rawConfig) {
       if (event.type === 'turn/start') {
         state.buffer = newBuffer(turn)
         if (typeof event.time === 'number') state.buffer.startedAt = event.time
-        void refreshDigest(state)
+        // session 模式只在会话开始时构建一次：省掉每轮重算，也让 system prompt 前缀稳定
+        // （对做前缀缓存的 provider 更省 token；代价是相关度不随本轮问题变化）。
+        if (config.injectRefresh !== 'session') void refreshDigest(state)
         return
       }
       if (event.type === 'turn/end') {
@@ -946,7 +1005,13 @@ export function apply(ctx, rawConfig) {
       }
       applyEvent(state.buffer, event)
       // relevance 模式依赖本轮用户输入做相关度挑选，收到真人输入后立刻重算。
-      if (config.injectMode === 'relevance' && event.type === 'user/message' && event.data?.source?.kind === 'user') {
+      // session 模式不重算（见 turn/start 处的注释）。
+      if (
+        config.injectRefresh !== 'session' &&
+        config.injectMode === 'relevance' &&
+        event.type === 'user/message' &&
+        event.data?.source?.kind === 'user'
+      ) {
         void refreshDigest(state)
       }
     } catch (error) {
@@ -1112,6 +1177,7 @@ export function apply(ctx, rawConfig) {
           file: { type: 'string' },
           kind: { type: 'string' },
           truncated: { type: 'boolean' },
+          duplicate: { type: 'boolean' },
         },
       },
       render: (_args, value) => [
@@ -1119,7 +1185,7 @@ export function apply(ctx, rawConfig) {
           type: 'text',
           text: `已记录到工作区记忆：${value.file}（${value.kind}）${
             value.truncated === true ? `（原文超过 ${NOTE_TEXT_LIMIT} 字符，已截断）` : ''
-          }`,
+          }${value.duplicate === true ? '（已存在相同内容，跳过重复写入）' : ''}`,
         },
       ],
     },
@@ -1136,13 +1202,23 @@ export function apply(ctx, rawConfig) {
       if (state === undefined) throw new Error('memory_note requires a live agent session with a workspace')
       const target = kind === 'progress' || kind === 'error' || kind === 'todo' ? 'PROGRESS.md' : 'MEMORY.md'
       const file = join(state.dir, target)
-      // 骨架文件可能已由新会话创建；只有缺失或为空时才补表头。
-      if ((await readIfExists(file)).trim() === '') await writeFile(file, docHeader(target, state), 'utf8')
       const label = KIND_LABELS[kind] ?? KIND_LABELS.note
-      const line = `- ${stamp()} [${label}] ${title !== '' ? `${title}：` : ''}${collapse(text)}\n`
+      const body = `${title !== '' ? `${title}：` : ''}${collapse(text)}`
+      const existing = await readIfExists(file)
+      // 骨架文件可能已由新会话创建；只有缺失或为空时才补表头。
+      if (existing.trim() === '') await writeFile(file, docHeader(target, state), 'utf8')
+      // 查重：同一 kind 下正文完全相同就不重复写，避免同一结论反复占用注入预算。
+      const marker = `[${label}] ${body}`
+      const duplicate = existing
+        .split(/\r?\n/u)
+        .some((line) => line.startsWith('- ') && line.includes(marker))
+      if (duplicate) {
+        return { ok: true, file: displayPath(state.cwd, file), kind, truncated, duplicate: true }
+      }
+      const line = `- ${stamp()} ${marker}\n`
       await appendFile(file, line, 'utf8')
       await refreshDigest(state)
-      return { ok: true, file: displayPath(state.cwd, file), kind, truncated }
+      return { ok: true, file: displayPath(state.cwd, file), kind, truncated, duplicate: false }
     },
     presentCall: (args) => ({
       card: 'generic',
@@ -1417,6 +1493,8 @@ export const __test = {
   splitTurnBlocks,
   queryTerms,
   scoreTerms,
+  decayFactor,
+  redactSensitive,
   docBody,
   clip,
   clipDoc,

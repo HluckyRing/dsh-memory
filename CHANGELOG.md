@@ -25,6 +25,11 @@
 ### 变更
 - **子代理注入改为可选**：新增 `injectSubagents`（默认 `false`）。此前子代理虽然默认不记录，却仍会收到整段记忆上下文，白付 token；现在默认不注入，需要时显式打开。
 - **已弃用 API 迁移**：相关度查询优先用 `session.deriveMessages()`（`user/message` 的 `data` 仍保留 `source.kind`），`snapshotEvents()` 只在旧运行时兜底；`systemPrompt` 改用 `agentCtx.get('systemPrompt')` 获取，不再依赖祖先 fiber 是否 inject。自检新增 4 条（共 29 条）。
+- **相关度打分质量**：查询分词过滤中英文停用词；命中数再乘以基于文件 mtime 的时间衰减（`relevanceHalfLifeDays`，默认 30 天，0 = 不衰减），同分时新块优先。
+- **`memory_note` 查重**：同一 `kind` 下正文完全相同的 note 不再重复写入，返回值增加 `duplicate: true` 并提示跳过。
+- **注入刷新时机可配**：新增 `injectRefresh`（默认 `turn`；`session` 只在会话开始构建一次，省重算并利于 prompt 前缀缓存，代价是相关度不随本轮问题变化）。
+- **错误文本脱敏**：工具错误写入会话日志前会遮蔽常见密钥串（`sk-`、`ghp_`、`AKIA` 等）与家目录路径（替换为 `~`），尽力减少日志里的敏感信息。
+- **工具 execute 覆盖补齐**：新增 `memory_search` / `memory_status` 的离线测试，加上此前的 `memory_note`，三个工具的执行路径都有断言。自检新增 3 条（共 32 条）。
 
 ## [1.0.0] - 2026-11-08
 

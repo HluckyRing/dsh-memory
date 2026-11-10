@@ -131,12 +131,14 @@ plugin_manager(action: "install_bundle", target: "D:\\vibe-coding\\plugin\\dsh-m
     recentTurns: 3            # recent 模式：每个历史会话注入最近几轮
     relevanceScanSessions: 20 # relevance 模式：扫描多少个会话文件
     relevanceKeepRecent: 1    # relevance 模式：始终保留最近几块（上下文连贯）
+    relevanceHalfLifeDays: 30 # relevance 打分的时间衰减半衰期（天）；0 = 不衰减
+    injectRefresh: turn       # turn=每轮重建（默认）；session=会话开始构建一次（利于前缀缓存）
     scaffoldDocs: true        # 新工作区自动创建 MEMORY.md / PROGRESS.md 骨架
     captureSubagents: false   # 是否也记录子代理会话
     injectSubagents: false    # 是否也向子代理会话注入记忆
 ```
 
-全部字段（`dirName`、`capture`、`inject`、`injectMode`、`maxInjectChars`、`scaffoldDocs`、`includeWorkspaceMemoryDoc`、`recentSessions`、`recentTurns`、`relevanceScanSessions`、`relevanceKeepRecent`、`userTextLimit`、`assistantTextLimit`、`sessionTextLimit`、`captureSubagents`、`injectSubagents`、`fallbackDir`）见 [docs/CONFIG.md](docs/CONFIG.md)。
+全部字段（`dirName`、`capture`、`inject`、`injectMode`、`injectRefresh`、`maxInjectChars`、`scaffoldDocs`、`includeWorkspaceMemoryDoc`、`recentSessions`、`recentTurns`、`relevanceScanSessions`、`relevanceKeepRecent`、`relevanceHalfLifeDays`、`userTextLimit`、`assistantTextLimit`、`sessionTextLimit`、`captureSubagents`、`injectSubagents`、`fallbackDir`）见 [docs/CONFIG.md](docs/CONFIG.md)。
 
 ### 注入方式：recent 与 relevance
 
