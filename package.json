@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "DeepSeek Harness plain-text memory: auto-records every turn of a workspace into .dsh-memory/, injects the relevant history into new sessions, and exposes memory_note / memory_search / memory_status tools.",
   "type": "module",
   "license": "MIT",

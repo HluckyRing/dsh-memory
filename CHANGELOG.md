@@ -4,7 +4,9 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.1.0] - 2026-11-12
+
+1.0.0 之后的加固版：修复注入上下文的模板插值/截断/边界问题，补齐会话索引、子代理注入开关、relevance 质量与 CI 密钥守卫，并迁移已弃用的运行时 API。无破坏性配置变更，新增字段均有默认值。
 
 ### 修复
 - **记忆里的 `{{...}}` 会让整轮会话失败**：注入用的 `systemPrompt.context` 注册现在传 `interpolate: false`。`system-prompt` 默认对 context 文本做 `{{变量}}` 插值，MEMORY / PROGRESS / 历史会话里一旦出现成对 `{{...}}`（Vue/Handlebars 模板、GitHub Actions 的 `${{ }}`、代码片段），prompt 组装会抛 `unknown/malformed prompt variable`，该轮 turn 直接报错且不修文件就每轮复发；现在记忆文本一律按原文注入。自检新增两条断言锁定该行为。

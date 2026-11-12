@@ -4,7 +4,7 @@
 > 每一轮对话自动记成 Markdown → 新会话自动把相关历史读回来。
 
 [![license: MIT](https://img.shields.io/badge/license-MIT-4F7CFF.svg)](LICENSE)
-[![dsh plugin](https://img.shields.io/badge/dsh-plugin-1.0.0-F5A524.svg)](https://github.com/HluckyRing/dsh-memory)
+[![dsh plugin](https://img.shields.io/badge/dsh-plugin-1.1.0-F5A524.svg)](https://github.com/HluckyRing/dsh-memory)
 
 没有数据库、没有向量检索、没有额外模型调用、没有 `node_modules` —— 全部是可读、可改、可直接删的 Markdown 文件。
 
