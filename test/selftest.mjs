@@ -3,7 +3,7 @@
  * 运行：node test/selftest.mjs
  */
 import assert from 'node:assert/strict'
-import { appendFile, mkdir, mkdtemp, readFile, stat, writeFile, rm, utimes } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, readdir, stat, writeFile, rm, utimes } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -793,6 +793,153 @@ try {
     assert.equal(t.resolveConfig({}).injectRefresh, 'turn')
     assert.equal(t.resolveConfig({ injectRefresh: 'session' }).injectRefresh, 'session')
     assert.equal(t.resolveConfig({ injectRefresh: 'bogus' }).injectRefresh, 'turn')
+  })
+
+  await test('archiveDirs only keeps safe relative dirs', () => {
+    assert.deepEqual(
+      t.resolveConfig({ archiveDirs: ['../x', '/abs', 'C:/abs', 'docs/session-log/'] }).archiveDirs,
+      ['docs/session-log'],
+    )
+    assert.deepEqual(t.resolveConfig({ archiveDirs: 'docs/session-log, docs/a' }).archiveDirs, [
+      'docs/session-log',
+      'docs/a',
+    ])
+    assert.deepEqual(t.resolveConfig({}).archiveDirs, [])
+    assert.equal(t.resolveConfig({ archiveRecent: 0 }).archiveRecent, 1)
+  })
+
+  await test('archive dirs, session recap and todo snapshot are bridged into context', async () => {
+    const bridgeCwd = join(root, 'bridge-workspace')
+    const archiveDir = join(bridgeCwd, 'docs', 'session-log')
+    await mkdir(archiveDir, { recursive: true })
+    const oldArchive = join(archiveDir, '2026-10-01-old.md')
+    const newArchive = join(archiveDir, '2026-11-12-new.md')
+    await writeFile(oldArchive, '# 旧归档标题\n\n旧内容KEY\n', 'utf8')
+    await writeFile(newArchive, '# 新归档标题\n\n新内容ARCHIVEKEY\n', 'utf8')
+    await utimes(oldArchive, new Date('2026-10-01T10:00:00Z'), new Date('2026-10-01T10:00:00Z'))
+    await utimes(newArchive, new Date('2026-11-12T10:00:00Z'), new Date('2026-11-12T10:00:00Z'))
+
+    const tools = new Map()
+    const listeners = new Map()
+    const bridgeConfig = t.resolveConfig({ archiveDirs: ['docs/session-log'], archiveRecent: 1 })
+    const agent = {
+      id: 'agent-bridge-0001',
+      session: {
+        id: 'session-bridge-0001',
+        header: { cwd: bridgeCwd, createdAt: Date.now() },
+        deriveMessages: () => [],
+      },
+      ctx: {
+        on: () => () => {},
+        effect: (fn) => {
+          fn()
+          return () => {}
+        },
+        get: (serviceName) => (serviceName === 'systemPrompt' ? { context: () => () => {} } : undefined),
+      },
+    }
+    const fakeCtx = {
+      on: (event, listener) => {
+        listeners.set(event, listener)
+        return () => {}
+      },
+      get: () => undefined,
+      agents: { roots: () => [agent], currentInitiator: () => undefined },
+      tools: {
+        register: (definition) => {
+          tools.set(definition.name, definition)
+          return () => {}
+        },
+      },
+    }
+    const dispose = mod.apply(fakeCtx, bridgeConfig)
+    const waitFor = async (fn) => {
+      for (let i = 0; i < 120; i += 1) {
+        if (await fn()) return true
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      return false
+    }
+    try {
+      const sessionsDir = join(bridgeCwd, '.dsh-memory', 'sessions')
+      assert.ok(await waitFor(() => exists(sessionsDir)), 'install must create the memory dir')
+      const emit = (event) => listeners.get('session/event')(agent.session, event)
+      const playTurn = (turn, userText, assistantText) => {
+        emit({ type: 'turn/start', data: { turn }, time: Date.now() })
+        emit({
+          type: 'user/message',
+          data: { source: { kind: 'user' }, content: [{ type: 'text', text: userText }] },
+        })
+        emit({ type: 'todo/write', data: { todos: [
+          { content: '已完成项', status: 'completed' },
+          { content: '进行中项', status: 'in_progress' },
+          { content: '待办项', status: 'pending' },
+        ] } })
+        emit({
+          type: 'assistant/message',
+          data: { message: { role: 'assistant', content: [{ type: 'text', text: assistantText }] } },
+        })
+        emit({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+      }
+      playTurn(1, '第一个问题', '第一个结论')
+      playTurn(2, '第二个问题', '第二个结论')
+      assert.ok(
+        await waitFor(async () => {
+          const text = await readFile(join(bridgeCwd, '.dsh-memory', 'TODOS.md'), 'utf8').catch(() => '')
+          return text.includes('待办项')
+        }),
+        'todo snapshot must be written',
+      )
+      assert.ok(
+        await waitFor(async () => {
+          const text = await readFile(join(bridgeCwd, '.dsh-memory', 'index.md'), 'utf8').catch(() => '')
+          return text.includes('第一个问题')
+        }),
+        'index line must be written before recap',
+      )
+      listeners.get('agent/disposed')({ agent })
+      const recapsDir = join(bridgeCwd, '.dsh-memory', 'recaps')
+      assert.ok(
+        await waitFor(async () => {
+          const names = await readdir(recapsDir).catch(() => [])
+          return names.length === 1
+        }),
+        'recap must be written on agent disposal',
+      )
+      const recapText = await readFile(join(recapsDir, (await readdir(recapsDir))[0]), 'utf8')
+      assert.match(recapText, /轮数：2/u)
+      assert.match(recapText, /首问：第一个问题/u)
+      assert.match(recapText, /末问：第二个问题/u)
+      assert.match(recapText, /最后结论：第二个结论/u)
+      const indexText = await readFile(join(bridgeCwd, '.dsh-memory', 'index.md'), 'utf8')
+      assert.match(indexText, /第一个问题 → 第二个问题（2 轮，完成）/u)
+      const todosText = await readFile(join(bridgeCwd, '.dsh-memory', 'TODOS.md'), 'utf8')
+      assert.match(todosText, /- \[x\] 已完成项/u)
+      assert.match(todosText, /- \[~\] 进行中项（进行中）/u)
+      assert.match(todosText, /- \[ \] 待办项/u)
+
+      const digest = await t.buildDigest(
+        {
+          ...state,
+          cwd: bridgeCwd,
+          dir: join(bridgeCwd, '.dsh-memory'),
+          sessionId: 'session-new-0002',
+          slug: t.sessionSlug('session-new-0002'),
+        },
+        bridgeConfig,
+      )
+      assert.match(digest, /待办快照/u)
+      assert.match(digest, /上次会话摘要/u)
+      assert.match(digest, /最近归档/u)
+      assert.match(digest, /新归档标题/u)
+      assert.doesNotMatch(digest, /旧归档标题/u)
+
+      const found = await tools.get('memory_search').execute({ query: 'ARCHIVEKEY' }, { agent })
+      assert.ok(found.matches.length >= 1, 'memory_search must scan archive dirs')
+      assert.equal(found.matches[0].file, 'docs/session-log/2026-11-12-new.md')
+    } finally {
+      dispose()
+    }
   })
 
   await test('digest is capped by maxInjectChars', async () => {

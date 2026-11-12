@@ -30,6 +30,9 @@ DSH 开新会话时，agent 对上一个会话聊了什么一无所知：为什�
 | 查看状态 | 模型调用 `memory_status` | 显示记忆目录、会话数、以及新会话将看到的确切注入内容 |
 | 相关度挑选 | 自动，`injectMode: relevance`（默认） | 本地关键词打分挑选与本轮相关的历史块，同样的字符预算装更相关的内容 |
 | 会话索引 | 自动，写入该会话首轮时更新 `index.md` | 日期 + 会话短 id + 首条用户输入，让新会话发现超出扫描范围的更早历史 |
+| 会话摘要 | 自动，会话结束（`agent/disposed`） | 轮数 / 首末问 / 最后结论 / 状态写入 `recaps/`，下次会话注入“上次会话摘要” |
+| 待办快照 | 自动，收到 `todo/write` | root 会话把最近待办写成 `TODOS.md`，开工就能看到“手上还有什么” |
+| 归档目录接入 | 自动，配置 `archiveDirs`（如 `["docs/session-log"]`） | 注入“最近归档”（文件名 + 标题），并让 `memory_search` 检索人工归档长文 |
 | 兜底不丢 | 自动，工作区不可写时 | 退回 `~/.dsh/dsh-memory/<工作区名>-<hash>` |
 
 ## 安装
@@ -69,6 +72,8 @@ plugin_manager(action: "install_bundle", target: "D:\\vibe-coding\\plugin\\dsh-m
 ├─ MEMORY.md              # 长期事实 / 决定 / 偏好（agent 通过 memory_note 主动写入）
 ├─ PROGRESS.md            # 任务进度 / 错误 / 待办（同样由 memory_note 写入）
 ├─ index.md               # 会话索引：日期 + 会话短 id + 首条用户输入（自动维护）
+├─ TODOS.md               # 最近一次 todo 快照（自动维护）
+├─ recaps/                # 每次会话结束的确定性摘要（自动维护）
 ├─ README.md              # 目录说明（首次自动创建）
 ├─ .gitignore             # 内容为 *，因此数据永远不会进 git
 └─ sessions/
@@ -133,12 +138,14 @@ plugin_manager(action: "install_bundle", target: "D:\\vibe-coding\\plugin\\dsh-m
     relevanceKeepRecent: 1    # relevance 模式：始终保留最近几块（上下文连贯）
     relevanceHalfLifeDays: 30 # relevance 打分的时间衰减半衰期（天）；0 = 不衰减
     injectRefresh: turn       # turn=每轮重建（默认）；session=会话开始构建一次（利于前缀缓存）
+    archiveDirs: []           # 人工归档目录（如 ["docs/session-log"]）：注入最近归档 + 纳入检索
+    archiveRecent: 3          # “最近归档”注入几个文件
     scaffoldDocs: true        # 新工作区自动创建 MEMORY.md / PROGRESS.md 骨架
     captureSubagents: false   # 是否也记录子代理会话
     injectSubagents: false    # 是否也向子代理会话注入记忆
 ```
 
-全部字段（`dirName`、`capture`、`inject`、`injectMode`、`injectRefresh`、`maxInjectChars`、`scaffoldDocs`、`includeWorkspaceMemoryDoc`、`recentSessions`、`recentTurns`、`relevanceScanSessions`、`relevanceKeepRecent`、`relevanceHalfLifeDays`、`userTextLimit`、`assistantTextLimit`、`sessionTextLimit`、`captureSubagents`、`injectSubagents`、`fallbackDir`）见 [docs/CONFIG.md](docs/CONFIG.md)。
+全部字段（`dirName`、`capture`、`inject`、`injectMode`、`injectRefresh`、`maxInjectChars`、`scaffoldDocs`、`includeWorkspaceMemoryDoc`、`recentSessions`、`recentTurns`、`relevanceScanSessions`、`relevanceKeepRecent`、`relevanceHalfLifeDays`、`archiveDirs`、`archiveRecent`、`userTextLimit`、`assistantTextLimit`、`sessionTextLimit`、`captureSubagents`、`injectSubagents`、`fallbackDir`）见 [docs/CONFIG.md](docs/CONFIG.md)。
 
 ### 注入方式：recent 与 relevance
 

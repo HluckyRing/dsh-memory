@@ -23,7 +23,8 @@ export function apply(ctx, rawConfig) { ... }
   agent/created ──► systemPrompt.context（按会话作用域的动态上下文）
                           ▲
                           │ buildDigest()：每次请求现读磁盘
-                          │   MEMORY.md + PROGRESS.md + index.md
+                          │   MEMORY.md + PROGRESS.md + TODOS.md
+                          │   + index.md + recaps/ + archiveDirs 最近归档
                           │   + relevance/recent 挑选的历史轮次块
                           │   → <dsh_memory> 文本（上限 maxInjectChars）
 ```
@@ -92,6 +93,7 @@ ctx.tools.register({
 | 状态 | 存放 | 何时清理 |
 | --- | --- | --- |
 | 会话 id → 记忆状态（cwd、目录、本轮缓冲） | `apply` 内的 `Map` | 会话销毁 / `agent/created` 重建 |
+| 会话 id → 摘要累加器 | `apply` 内的 `recapsBySession` | `agent/disposed` 落盘后 / 插件卸载 |
 | dynamic context 注册 | `agentCtx.effect()` | 插件卸载或会话销毁 |
 | 全局事件监听 | `apply` 返回的清理函数 | 插件卸载 |
 
@@ -107,13 +109,16 @@ ctx.tools.register({
 | `buildTurnEntry()` | 一轮缓冲 → Markdown 块 |
 | `appendTurn()` | 轮次落盘（内存 `Set` 去重）+ 首轮写会话索引 |
 | `ensureSessionIndexFile()` / `appendIndexLine()` | 维护 `index.md`：老工作区回填、新会话首轮追加 |
+| `updateRecap()` / `finalizeRecap()` | 会话结束写 `recaps/<日期>_<会话>.md`，并把索引行升级成“首问 → 末问（N 轮，状态）” |
+| `writeTodoSnapshot()` | 收到 `todo/write` 时覆盖写 `TODOS.md`（仅 root 会话） |
+| `listArchiveFiles()` | 读取 `archiveDirs` 里按 mtime 最新的 Markdown（注入“最近归档”+ 供 `memory_search`） |
 | `buildDigest()` | 磁盘 → `<dsh_memory>` 文本 |
 | `relevanceHistorySections()` / `recentHistorySections()` | 两种挑选策略 |
 | `memory_note` / `memory_search` / `memory_status` | 三个模型工具 |
 
 ## 测试
 
-`test/selftest.mjs` 不依赖 Harness 运行时，用临时工作区验证：目录与骨架创建、逐轮记录落盘、注入文本组装与截断、相关度挑选、会话索引、子代理注入开关、工具 Schema 与工具行为。跑法：
+`test/selftest.mjs` 不依赖 Harness 运行时，用临时工作区验证：目录与骨架创建、逐轮记录落盘、注入文本组装与截断、相关度挑选、会话索引、会话摘要 / 待办快照 / 归档目录接入、子代理注入开关、工具 Schema 与工具行为。跑法：
 
 ```bash
 npm test          # 或 node test/selftest.mjs
@@ -127,5 +132,8 @@ npm run check     # 语法 + 全量密钥扫描 + 自检
 - 不做跨工作区聚合：记忆严格跟着 `cwd` 走；工作区不可写时才回落到全局目录。
 - 注入的是「历史摘要」而不是完整对话：单条文本与每会话块都截断，细节靠 `memory_search` 检索原始 `sessions/*.md`。
 - 会话索引只回填最近 200 个旧会话；更早的文件仍在 `sessions/` 里，可用 `memory_search` 检索。
+- 归档目录只扫描 `archiveDirs` 的**一层** `.md` 文件（不递归）；只注入文件名/标题，不复制内容。
+- 会话摘要只在 `agent/disposed` 正常触发时写入；进程被强杀会丢当次摘要，下次会话只能靠索引与历史轮次。
+- 待办快照只由 root 会话写，子代理的 todo 不覆盖工作区 `TODOS.md`；无 todo 事件时不会创建该文件。
 - `latestHumanText()` 优先用 `session.deriveMessages()`；只有旧运行时（没有该方法）才退回已被标记 deprecated 的 `snapshotEvents()`。`recoverBuffer()`（插件在一轮中途装载时补记）仍依赖 `snapshotEvents()`，若未来运行时移除该方法，该轮会退化为不补记。
 - 子代理默认不注入记忆（`injectSubagents: false`），也不单独记录（`captureSubagents: false`）。

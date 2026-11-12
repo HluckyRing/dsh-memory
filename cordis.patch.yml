@@ -36,6 +36,10 @@
         relevanceHalfLifeDays: 30
         # 注入刷新时机：turn=每轮重建（默认）；session=会话开始构建一次（利于 prompt 前缀缓存）。
         injectRefresh: turn
+        # 人工归档目录（相对工作区根）：注入“最近归档”并纳入 memory_search。
+        archiveDirs: []
+        # “最近归档”注入的文件数。
+        archiveRecent: 3
         # 单条文本截断上限（字符）。
         userTextLimit: 500
         assistantTextLimit: 700

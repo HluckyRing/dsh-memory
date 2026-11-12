@@ -29,6 +29,8 @@ const LOG_PREFIX = '[dsh-memory]'
 const MEMORY_DIR = '.dsh-memory'
 const CONTEXT_NAME = 'dsh-memory'
 const INDEX_FILE = 'index.md'
+const RECAP_DIR = 'recaps'
+const TODOS_FILE = 'TODOS.md'
 /** 单条 memory_note 文本上限：超过就截断并标记，避免一条大 note 挤掉其他记忆 */
 const NOTE_TEXT_LIMIT = 2000
 
@@ -69,6 +71,10 @@ const DEFAULTS = {
   relevanceHalfLifeDays: 30,
   /** 注入刷新时机：turn=每轮重建（默认，相关度跟随本轮问题）；session=会话开始构建一次（省重算，利于 prompt 前缀缓存） */
   injectRefresh: 'turn',
+  /** 人工归档目录（相对工作区根），用于注入“最近归档”并纳入 memory_search；默认空 */
+  archiveDirs: [],
+  /** “最近归档”注入的文件数 */
+  archiveRecent: 3,
   /** 工作区不可写时的备用存放目录（留空则用 ~/.dsh/dsh-memory） */
   fallbackDir: '',
 }
@@ -116,6 +122,25 @@ function safeDirName(raw) {
   return segments.join('/')
 }
 
+/**
+ * 归档目录只接受工作区内的相对目录（最多 5 个）：绝对路径/`..` 逃逸直接忽略。
+ * 接受字符串数组，也接受逗号分隔的字符串。
+ */
+function normalizeArchiveDirs(raw) {
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : []
+  const dirs = []
+  for (const item of list) {
+    const value = str(item).replace(/^\.\//u, '').replace(/[/\\]+$/u, '')
+    if (value === '' || isAbsolute(value) || /^[A-Za-z]:/u.test(value)) continue
+    const segments = value.split(/[\\/]+/u).filter((segment) => segment !== '' && segment !== '.')
+    if (segments.length === 0 || segments.includes('..')) continue
+    const clean = segments.join('/')
+    if (!dirs.includes(clean)) dirs.push(clean)
+    if (dirs.length >= 5) break
+  }
+  return dirs
+}
+
 function resolveConfig(raw) {
   const c = raw && typeof raw === 'object' ? raw : {}
   return {
@@ -137,6 +162,8 @@ function resolveConfig(raw) {
     relevanceKeepRecent: clampInt(c.relevanceKeepRecent, DEFAULTS.relevanceKeepRecent, 0, 5),
     relevanceHalfLifeDays: clampInt(c.relevanceHalfLifeDays, DEFAULTS.relevanceHalfLifeDays, 0, 3650),
     injectRefresh: c.injectRefresh === 'session' ? 'session' : 'turn',
+    archiveDirs: normalizeArchiveDirs(c.archiveDirs),
+    archiveRecent: clampInt(c.archiveRecent, DEFAULTS.archiveRecent, 1, 10),
     fallbackDir: str(c.fallbackDir),
   }
 }
@@ -385,6 +412,8 @@ function scaffoldReadme(config) {
     '| `MEMORY.md` | 长期事实、决定、偏好（agent 通过 `memory_note` 主动写入） |',
     '| `PROGRESS.md` | 任务进度与错误（agent 通过 `memory_note` 主动写入） |',
     '| `index.md` | 会话索引（日期 + 会话短 id + 首条用户输入摘要，自动维护） |',
+    '| `TODOS.md` | 最近一次 `todo_write` 的待办快照（自动维护） |',
+    '| `recaps/*.md` | 每次会话结束时的确定性摘要（自动维护） |',
     '| `sessions/*.md` | 每个会话每轮自动记录的关键信息（用户要点、助手结论、工具、错误、todo 进度） |',
     '',
     `新会话开始时，会读取本目录内容并注入上下文（上限约 ${Math.round(config.maxInjectChars / 1000)}k 字符）。`,
@@ -445,6 +474,159 @@ async function appendIndexLine(state, buffer) {
   const line = `- ${dayStamp(new Date(state.startedAt))} ${slug}：${clip(first, 80) || '（无文本）'}\n`
   if (existing.trim() === '') await writeFile(indexPath, sessionIndexHeader(), 'utf8')
   await appendFile(indexPath, line, 'utf8')
+}
+
+/* ────────────────────────────── 归档目录 / 会话摘要 / 待办快照 ────────────────────────────── */
+
+/** 列出所有人工归档目录里的 Markdown 文件（按 mtime 倒序）。 */
+async function listArchiveFiles(state, config) {
+  const files = []
+  for (const rel of config.archiveDirs) {
+    const dir = join(state.cwd, rel)
+    let names = []
+    try {
+      names = await readdir(dir)
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      if (!name.endsWith('.md')) continue
+      const path = join(dir, name)
+      try {
+        const info = await stat(path)
+        if (info.isFile()) files.push({ path, rel: `${rel}/${name}`, mtime: info.mtimeMs })
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return files.sort((a, b) => b.mtime - a.mtime)
+}
+
+/** 最近一篇会话摘要（注入用；排除当前会话自己还没写完的那篇）。 */
+async function latestRecap(state) {
+  const dir = join(state.dir, RECAP_DIR)
+  let names = []
+  try {
+    names = await readdir(dir)
+  } catch {
+    return null
+  }
+  const ownPrefix = `${dayStamp(new Date(state.startedAt))}_${str(state.slug, sessionSlug(state.sessionId))}`
+  const candidates = []
+  for (const name of names) {
+    if (!name.endsWith('.md') || name.replace(/\.md$/u, '') === ownPrefix) continue
+    const path = join(dir, name)
+    try {
+      const info = await stat(path)
+      if (info.isFile()) candidates.push({ path, name, mtime: info.mtimeMs })
+    } catch {
+      /* ignore */
+    }
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime)
+  const newest = candidates[0]
+  if (newest === undefined) return null
+  return { name: newest.name.replace(/\.md$/u, ''), text: await readIfExists(newest.path) }
+}
+
+/** 汇总一轮的关键信息，供会话结束时落成摘要。 */
+function updateRecap(recap, buffer) {
+  if (recap === null || recap === undefined || buffer === null || buffer === undefined) return
+  const lastUser = collapse(buffer.users.join(' / '))
+  if (lastUser !== '') {
+    recap.lastAsk = lastUser
+    if (recap.firstAsk === '') recap.firstAsk = lastUser
+  }
+  if (buffer.assistant !== '') recap.lastAssistant = collapse(buffer.assistant)
+  recap.lastStatus = reasonText(buffer.reason ?? { kind: 'completed' })
+  recap.turns = Math.max(recap.turns, Number(buffer.turn) || 0)
+  recap.errors += buffer.errors.length
+  for (const [name, count] of buffer.tools) recap.tools.set(name, (recap.tools.get(name) ?? 0) + count)
+  recap.human = recap.human || buffer.human === true
+}
+
+function buildIndexSummary(recap) {
+  const first = clip(collapse(recap.firstAsk), 60)
+  const last = clip(collapse(recap.lastAsk), 60)
+  const parts = []
+  if (first !== '') parts.push(first)
+  if (last !== '' && last !== first) parts.push(`→ ${last}`)
+  return `- ${recap.date} ${recap.slug}：${parts.join(' ') || '（无文本）'}（${recap.turns} 轮，${recap.lastStatus}）`
+}
+
+/** 把索引里该会话的行替换成带末轮/轮数/状态的摘要。 */
+function updateIndexLine(text, slug, summary) {
+  const lines = String(text ?? '').split(/\r?\n/u)
+  let found = false
+  const next = lines.map((line) => {
+    if (found || !line.startsWith('- ') || !line.includes(` ${slug}：`)) return line
+    found = true
+    return summary
+  })
+  if (!found) return `${String(text ?? '').trimEnd()}\n${summary}\n`
+  return `${next.join('\n').replace(/\n+$/u, '')}\n`
+}
+
+/** 会话结束：写 recaps/<date>_<slug>.md，并把索引行升级成“首问 → 末问（N 轮，状态）”。 */
+async function finalizeRecap(recap) {
+  if (recap === null || recap === undefined || recap.human !== true) return
+  const recapsDir = join(recap.dir, RECAP_DIR)
+  await mkdir(recapsDir, { recursive: true })
+  const tools = [...recap.tools.entries()]
+    .map(([name, count]) => (count > 1 ? `${name}×${count}` : name))
+    .join('、')
+  const lines = [
+    `# 会话摘要 · ${recap.date}`,
+    '',
+    `- 会话：${recap.sessionId}`,
+    `- 轮数：${recap.turns}；状态：${recap.lastStatus}`,
+    `- 首问：${clip(collapse(recap.firstAsk), 160) || '（无文本）'}`,
+    `- 末问：${clip(collapse(recap.lastAsk), 160) || '（无文本）'}`,
+  ]
+  if (recap.lastAssistant !== '') lines.push(`- 最后结论：${clip(collapse(recap.lastAssistant), 200)}`)
+  lines.push(`- 工具：${clip(tools, 200) || '无'}`, `- 错误：${recap.errors} 次`, '')
+  await writeFile(join(recapsDir, `${recap.date}_${recap.slug}.md`), lines.join('\n'), 'utf8')
+
+  const indexPath = join(recap.dir, INDEX_FILE)
+  const indexText = await readIfExists(indexPath)
+  const summary = buildIndexSummary(recap)
+  if (indexText.trim() === '') {
+    await writeFile(indexPath, `${sessionIndexHeader()}${summary}\n`, 'utf8')
+  } else {
+    const updated = updateIndexLine(indexText, recap.slug, summary)
+    if (updated !== indexText) await writeFile(indexPath, updated, 'utf8')
+  }
+}
+
+/** 待办快照：把最近一次 todo_write 写成 TODOS.md（每次更新覆盖）。 */
+function renderTodoLines(todos) {
+  return todos
+    .map((todo) => {
+      const content = clip(collapse(todo?.content), 200) || '（未命名）'
+      if (todo?.status === 'completed') return `- [x] ${content}`
+      if (todo?.status === 'in_progress') return `- [~] ${content}（进行中）`
+      return `- [ ] ${content}`
+    })
+    .join('\n')
+}
+
+async function writeTodoSnapshot(state) {
+  const todos = state.lastTodos
+  if (!Array.isArray(todos) || todos.length === 0) return
+  const body = [
+    '# 当前待办（最近一次 todo_write 快照）',
+    '',
+    `- 会话：${state.sessionId}`,
+    `- 更新：${stamp()}`,
+    '',
+    renderTodoLines(todos),
+    '',
+  ].join('\n')
+  state.todoChain = (state.todoChain ?? Promise.resolve())
+    .then(() => writeFile(join(state.dir, TODOS_FILE), body, 'utf8'))
+    .catch((error) => warn(`写入待办快照失败：${error instanceof Error ? error.message : error}`))
+  return state.todoChain
 }
 
 /* ────────────────────────────── 上下文组装 ────────────────────────────── */
@@ -665,12 +847,45 @@ async function buildDigest(state, config) {
     if (progressBody !== '') {
       include.push(`## 任务进度（${config.dirName}/PROGRESS.md）\n${clipTail(progressBody, 1600)}`)
     }
+    // 待办快照：最近一次 todo_write 的状态，比翻历史轮次更快看到“手上还有什么”。
+    const todosBody = docBody(await readIfExists(join(dir, TODOS_FILE)))
+    if (todosBody !== '') {
+      include.push(`## 待办快照（${config.dirName}/TODOS.md）\n${clipDoc(todosBody, 900)}`)
+    }
+    // 上次会话摘要：会话结束时由插件确定性生成，直接回答“上次停在哪”。
+    const recap = await latestRecap(state)
+    if (recap !== null) {
+      const recapBody = docBody(recap.text)
+      if (recapBody !== '') {
+        include.push(`## 上次会话摘要（${recap.name}）\n${clipDoc(recapBody, 700)}`)
+      }
+    }
     // 会话索引：只给“有哪些历史会话”的导航线索，细节仍靠 memory_search 检索。
     const indexBody = docBody(await readIfExists(join(dir, INDEX_FILE)))
     if (indexBody !== '') {
       include.push(
         `## 会话索引（日期 会话短id：首条用户输入；细节用 memory_search 检索）\n${clipDoc(indexBody, 1200)}`,
       )
+    }
+    // 最近归档：人工维护的 docs/ 长文（session-log 之类），只给文件名与标题。
+    if (config.archiveDirs.length > 0) {
+      const archives = (await listArchiveFiles(state, config)).slice(0, config.archiveRecent)
+      if (archives.length > 0) {
+        const archiveLines = []
+        for (const item of archives) {
+          const text = await readIfExists(item.path)
+          const title = text
+            .split(/\r?\n/u)
+            .map((line) => line.trim())
+            .find((line) => line !== '') ?? ''
+          archiveLines.push(
+            `- ${dayStamp(new Date(item.mtime))} ${item.rel}：${clip(collapse(title.replace(/^#+\s*/u, '')), 100)}`,
+          )
+        }
+        include.push(
+          `## 最近归档（${config.archiveDirs.join('、')}；细节用 memory_search 或读文件）\n${archiveLines.join('\n')}`,
+        )
+      }
     }
 
     if (config.injectMode === 'relevance') {
@@ -941,6 +1156,8 @@ export function apply(ctx, rawConfig) {
   const memoryRootCache = new Map()
   /** 会话 id → 记忆状态；用全局 session/event 路由，避免按 agent 作用域漏事件。 */
   const statesBySession = new Map()
+  /** 会话 id → 摘要累加器；agent/disposed 后 state 已清理，但仍需要它落盘。 */
+  const recapsBySession = new Map()
 
   async function stateFor(agent) {
     const record = installed.get(agent)
@@ -996,8 +1213,14 @@ export function apply(ctx, rawConfig) {
         buffer.reason = event.data?.reason
         if (!buffer.human) return
         if (!config.capture) return
+        updateRecap(state.recap, buffer)
         void appendTurn(state, buffer, config)
         return
+      }
+      if (event.type === 'todo/write' && Array.isArray(event.data?.todos)) {
+        // 待办快照只由 root 会话代表整个工作区写，避免子代理覆盖。
+        state.lastTodos = event.data.todos
+        if (state.isRoot) void writeTodoSnapshot(state)
       }
       if (state.buffer === null || state.buffer === undefined) {
         // 中途装载：turn/start 之前的事件不补，turn/end 时统一 recoverBuffer。
@@ -1057,11 +1280,30 @@ export function apply(ctx, rawConfig) {
         sessionHeaderWritten: false,
         writtenTurns: null,
         indexed: false,
+        lastTodos: null,
+        todoChain: Promise.resolve(),
+        recap: null,
       }
 
       const cachedRoot = memoryRootCache.get(cwd)
       state.dir = cachedRoot ?? (await ensureRoot(state, config))
       memoryRootCache.set(cwd, state.dir)
+
+      state.recap = {
+        dir: state.dir,
+        sessionId: state.sessionId,
+        slug: state.slug,
+        date: dayStamp(new Date(state.startedAt)),
+        firstAsk: '',
+        lastAsk: '',
+        lastAssistant: '',
+        lastStatus: '未结束',
+        turns: 0,
+        errors: 0,
+        tools: new Map(),
+        human: false,
+      }
+      recapsBySession.set(state.sessionId, state.recap)
 
       const dispose = agentCtx.effect(() => {
         const disposers = []
@@ -1135,6 +1377,21 @@ export function apply(ctx, rawConfig) {
       onSessionEvent(state, session, event)
     } catch (error) {
       warn(`路由会话事件失败：${error instanceof Error ? error.message : error}`)
+    }
+  })
+
+  // 会话结束：把确定性摘要落盘（agent 作用域已卸载，所以用独立 map 而不是 state）。
+  const stopDisposed = ctx.on('agent/disposed', ({ agent }) => {
+    try {
+      const id = String(agent?.session?.id ?? '')
+      const recap = recapsBySession.get(id)
+      if (recap === undefined) return
+      recapsBySession.delete(id)
+      void finalizeRecap(recap).catch((error) =>
+        warn(`写入会话摘要失败：${error instanceof Error ? error.message : error}`),
+      )
+    } catch (error) {
+      warn(`处理会话结束失败：${error instanceof Error ? error.message : error}`)
     }
   })
 
@@ -1298,11 +1555,23 @@ export function apply(ctx, rawConfig) {
       const files = []
       const rootMemory = join(state.cwd, 'MEMORY.md')
       if (config.includeWorkspaceMemoryDoc && (await exists(rootMemory))) files.push(rootMemory)
-      for (const name of ['MEMORY.md', 'PROGRESS.md']) {
+      for (const name of ['MEMORY.md', 'PROGRESS.md', TODOS_FILE]) {
         const path = join(state.dir, name)
         if (await exists(path)) files.push(path)
       }
+      const recapsDir = join(state.dir, RECAP_DIR)
+      try {
+        for (const name of await readdir(recapsDir)) {
+          if (name.endsWith('.md')) files.push(join(recapsDir, name))
+        }
+      } catch {
+        /* ignore */
+      }
       for (const file of await listSessionFiles(join(state.dir, 'sessions'))) files.push(file.path)
+      if (config.archiveDirs.length > 0) {
+        const archives = await listArchiveFiles(state, config)
+        for (const item of archives.slice(0, 100)) files.push(item.path)
+      }
 
       for (const path of files) {
         if (matches.length >= limit) {
@@ -1445,6 +1714,17 @@ export function apply(ctx, rawConfig) {
     } catch {
       /* ignore */
     }
+    try {
+      stopDisposed()
+    } catch {
+      /* ignore */
+    }
+    // 插件卸载/重载时把还活着的会话摘要也尽力落盘（幂等：覆盖写 + 替换索引行）。
+    for (const recap of recapsBySession.values()) {
+      void finalizeRecap(recap).catch((error) =>
+        warn(`写入会话摘要失败：${error instanceof Error ? error.message : error}`),
+      )
+    }
     for (const record of installed.values()) {
       try {
         record.dispose()
@@ -1454,6 +1734,7 @@ export function apply(ctx, rawConfig) {
     }
     installed.clear()
     statesBySession.clear()
+    recapsBySession.clear()
     memoryRootCache.clear()
   }
 }
@@ -1500,5 +1781,11 @@ export const __test = {
   clipDoc,
   clipTail,
   displayPath,
+  normalizeArchiveDirs,
+  updateRecap,
+  finalizeRecap,
+  writeTodoSnapshot,
+  renderTodoLines,
+  updateIndexLine,
   NOTE_TEXT_LIMIT,
 }

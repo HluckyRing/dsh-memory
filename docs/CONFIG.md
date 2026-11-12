@@ -37,6 +37,8 @@
 | `relevanceKeepRecent` | number | `1` | 0–5 | `relevance` 模式：无条件保留的最近轮次块数量，保证上下文连贯 |
 | `relevanceHalfLifeDays` | number | `30` | 0–3650 | `relevance` 打分的时间衰减半衰期（天）；`0` = 不衰减。老块权重 = 命中数 × 0.5^(年龄天数 / 半衰期) |
 | `injectRefresh` | string | `turn` | `turn` \| `session` | 注入刷新时机：`turn` 每轮重建（相关度跟随本轮问题）；`session` 会话开始构建一次（省重算、利于 prompt 前缀缓存，但相关度不随本轮问题变化） |
+| `archiveDirs` | string[] | `[]` | 工作区内相对目录，最多 5 个 | 人工归档目录（如 `["docs/session-log"]`）：注入“最近归档”（文件名 + 标题）并纳入 `memory_search`；绝对路径与含 `..` 的写法会被忽略 |
+| `archiveRecent` | number | `3` | 1–10 | “最近归档”注入的文件数 |
 | `userTextLimit` | number | `500` | 80–4000 | 单条用户文本记录上限（字符） |
 | `assistantTextLimit` | number | `700` | 80–8000 | 单条助手文本记录上限（字符） |
 | `sessionTextLimit` | number | `900` | 120–8000 | 注入时每个历史会话块的上限（字符） |
@@ -111,6 +113,8 @@
 | `MEMORY.md` | 长期事实 / 决定 / 偏好 | `memory_note`（`kind` = note/fact/decision/preference）或人手改 |
 | `PROGRESS.md` | 任务进度 / 错误 / 待办 | `memory_note`（`kind` = progress/error/todo）或人手改 |
 | `index.md` | 会话索引（日期 + 会话短 id + 首条用户输入摘要） | 插件自动维护；老工作区首次加载时自动回填（最多 200 个旧会话） |
+| `TODOS.md` | 最近一次 `todo_write` 的待办快照 | 插件自动（仅 root 会话写入；每次 todo 更新覆盖） |
+| `recaps/<日期>_<会话>.md` | 会话结束时的确定性摘要（轮数 / 首末问 / 最后结论 / 状态 / 错误） | 插件自动（`agent/disposed` 时写入，下一次会话注入“上次会话摘要”） |
 | `sessions/<日期>_<会话id>.md` | 每轮记录 | 插件自动 |
 | `README.md` | 目录说明 | 首次自动创建 |
 | `.gitignore` | 内容为 `*` | 首次自动创建，保证数据不进 git |
